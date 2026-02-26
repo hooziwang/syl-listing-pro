@@ -42,6 +42,9 @@ func RunGen(ctx context.Context, opts GenOptions) error {
 
 	api := client.New(workerBaseURL)
 	api.SetTrace(func(ev client.TraceEvent) {
+		if shouldSkipVerboseHTTPTrace(opts.Verbose, ev) {
+			return
+		}
 		log.Event("worker_http_"+ev.Stage, map[string]any{
 			"method":      ev.Method,
 			"url":         ev.URL,
@@ -142,6 +145,9 @@ RULE_SYNC_DONE:
 							elapsedForLog = item.ElapsedMS
 						}
 						if opts.Verbose {
+							if shouldSkipVerboseWorkerTrace(item) {
+								continue
+							}
 							log.Event("worker_trace", map[string]any{
 								"job_id":     item.JobID,
 								"tenant_id":  item.TenantID,
@@ -219,11 +225,34 @@ RULE_SYNC_DONE:
 		}
 	}
 
-	log.Info(fmt.Sprintf("任务完成：成功 %d，失败 %d，总耗时 %.2fs", success, failed, time.Since(startAll).Seconds()))
+	log.Info(fmt.Sprintf("任务完成：成功 %d，失败 %d，总耗时 %s", success, failed, humanDurationShort(time.Since(startAll))))
 	if failed > 0 {
 		return fmt.Errorf("存在失败任务")
 	}
 	return nil
+}
+
+func shouldSkipVerboseHTTPTrace(verbose bool, ev client.TraceEvent) bool {
+	if !verbose {
+		return true
+	}
+	if strings.EqualFold(ev.Method, "GET") &&
+		(strings.Contains(ev.URL, "/v1/jobs/") || strings.Contains(ev.URL, "/v1/admin/logs/trace/")) {
+		return true
+	}
+	return false
+}
+
+func shouldSkipVerboseWorkerTrace(item client.JobTraceItem) bool {
+	if item.Source != "api" {
+		return false
+	}
+	switch item.Event {
+	case "job_status_read", "job_result_not_ready":
+		return true
+	default:
+		return false
+	}
 }
 
 func renderWorkerTraceLine(item client.JobTraceItem) string {
@@ -520,4 +549,21 @@ func shortText(s string, n int) string {
 		return s
 	}
 	return strings.TrimSpace(s[:n]) + "..."
+}
+
+func humanDurationShort(d time.Duration) string {
+	if d < 0 {
+		d = -d
+	}
+	sec := int64(d.Round(time.Second) / time.Second)
+	h := sec / 3600
+	m := (sec % 3600) / 60
+	s := sec % 60
+	if h > 0 {
+		return fmt.Sprintf("%dh%dm%ds", h, m, s)
+	}
+	if m > 0 {
+		return fmt.Sprintf("%dm%ds", m, s)
+	}
+	return fmt.Sprintf("%ds", s)
 }
