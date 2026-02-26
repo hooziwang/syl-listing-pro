@@ -2,16 +2,22 @@ package rules
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"syl-listing-pro/internal/util"
 )
 
 func DefaultCacheDir() (string, error) {
+	cacheRoot, err := os.UserCacheDir()
+	if err == nil && cacheRoot != "" {
+		return filepath.Join(cacheRoot, "syl-listing-pro", "rules"), nil
+	}
 	base, err := util.DefaultAppDir()
 	if err != nil {
 		return "", err
 	}
+	// 兜底到旧目录，避免极端环境下无法定位系统缓存目录。
 	return filepath.Join(base, ".rules"), nil
 }
 
