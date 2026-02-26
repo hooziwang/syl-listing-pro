@@ -62,41 +62,56 @@ func RunGen(ctx context.Context, opts GenOptions) error {
 	}
 
 	// 启动前同步规则；失败时按策略回退。
-	st, _ := rules.LoadState(cacheDir)
+	st, _ := rules.LoadState(cacheDir, ex.TenantID)
 	res, err := api.ResolveRules(ctx, ex.AccessToken, st.RulesVersion)
 	if err != nil {
-		if st.RulesVersion == "" {
+		if st.RulesVersion == "" || !rules.HasArchive(st.ArchivePath) {
 			return fmt.Errorf("规则中心不可达且首次运行无缓存")
 		}
 		log.Info(fmt.Sprintf("规则中心不可达，继续使用本地规则（%s）", st.RulesVersion))
-	} else if !res.UpToDate {
-		data, gotSHA, dErr := api.Download(ctx, ex.AccessToken, res.DownloadURL)
-		if dErr != nil {
-			if st.RulesVersion == "" {
-				return fmt.Errorf("首次拉规则失败: %w", dErr)
-			}
-			log.Info(fmt.Sprintf("规则下载失败，继续使用本地规则（%s）", st.RulesVersion))
-		} else if gotSHA != res.ManifestSHA {
-			if st.RulesVersion == "" {
-				return fmt.Errorf("首次拉规则 sha256 不匹配")
-			}
-			log.Info(fmt.Sprintf("规则校验失败，继续使用本地规则（%s）", st.RulesVersion))
-		} else {
-			p, _ := rules.SaveArchive(cacheDir, res.RulesVersion, data)
-			if err := rules.VerifySignatureOpenSSL(cacheDir, res.SignatureBase64, p); err != nil {
-				if st.RulesVersion == "" {
-					return fmt.Errorf("首次拉规则签名校验失败: %w", err)
+	} else {
+		needDownload := !res.UpToDate || !rules.HasArchive(st.ArchivePath) || st.RulesVersion != res.RulesVersion
+		if needDownload {
+			data, gotSHA, dErr := api.Download(ctx, ex.AccessToken, res.DownloadURL)
+			if dErr != nil {
+				if st.RulesVersion == "" || !rules.HasArchive(st.ArchivePath) {
+					return fmt.Errorf("首次拉规则失败: %w", dErr)
 				}
-				log.Info(fmt.Sprintf("规则签名校验失败，继续使用本地规则（%s）", st.RulesVersion))
-				goto RULE_SYNC_DONE
+				log.Info(fmt.Sprintf("规则下载失败，继续使用本地规则（%s）", st.RulesVersion))
+			} else if gotSHA != res.ManifestSHA {
+				if st.RulesVersion == "" || !rules.HasArchive(st.ArchivePath) {
+					return fmt.Errorf("首次拉规则 sha256 不匹配")
+				}
+				log.Info(fmt.Sprintf("规则校验失败，继续使用本地规则（%s）", st.RulesVersion))
+			} else {
+				p, sErr := rules.SaveArchive(cacheDir, ex.TenantID, res.RulesVersion, data)
+				if sErr != nil {
+					return sErr
+				}
+				if err := rules.VerifySignatureOpenSSL(cacheDir, res.SignatureBase64, p); err != nil {
+					if st.RulesVersion == "" || !rules.HasArchive(st.ArchivePath) {
+						return fmt.Errorf("首次拉规则签名校验失败: %w", err)
+					}
+					log.Info(fmt.Sprintf("规则签名校验失败，继续使用本地规则（%s）", st.RulesVersion))
+				} else {
+					st = rules.CacheState{RulesVersion: res.RulesVersion, ManifestSHA: res.ManifestSHA, ArchivePath: p}
+					if err := rules.SaveState(cacheDir, ex.TenantID, st); err != nil {
+						return err
+					}
+					log.Info(fmt.Sprintf("规则中心：规则中心更新成功（%s）", res.RulesVersion))
+				}
 			}
-			_ = rules.SaveState(cacheDir, rules.CacheState{RulesVersion: res.RulesVersion, ManifestSHA: res.ManifestSHA, ArchivePath: p})
-			log.Info(fmt.Sprintf("规则中心：规则中心更新成功（%s）", res.RulesVersion))
 		}
 	}
-RULE_SYNC_DONE:
+	if st.RulesVersion == "" || !rules.HasArchive(st.ArchivePath) {
+		return fmt.Errorf("本地规则不可用")
+	}
+	marker, err := rules.LoadInputMarkerFromArchive(st.ArchivePath)
+	if err != nil {
+		return err
+	}
 
-	files, err := input.Discover(opts.Inputs)
+	files, err := input.Discover(opts.Inputs, marker)
 	if err != nil {
 		return err
 	}
@@ -263,51 +278,17 @@ func renderWorkerTraceLine(item client.JobTraceItem) string {
 			return ""
 		}
 	}
+	if msg := stringPayload(item.Payload, "message"); strings.TrimSpace(msg) != "" {
+		return strings.TrimSpace(msg)
+	}
 	switch item.Event {
 	case "generate_queued":
 		if strings.TrimSpace(item.JobID) != "" {
 			return fmt.Sprintf("任务已加入队列 %s", item.JobID)
 		}
 		return "任务已加入队列"
-	case "job_started":
-		return ""
-	case "job_rules_resolved":
-		return ""
-	case "generation_start":
-		return ""
 	case "rules_loaded":
 		return fmt.Sprintf("规则已加载 %s", stringPayload(item.Payload, "rules_version"))
-	case "planning_ok":
-		return fmt.Sprintf("生成策略规划完成（%s）", durationLabel(item.Payload, "duration_ms"))
-	case "planning_failed":
-		return "生成策略规划失败，继续执行默认流程"
-	case "section_generate_start":
-		return ""
-	case "section_generate_ok":
-		return fmt.Sprintf("%s完成（%s）", sectionLabel(item.Payload), durationLabel(item.Payload, "duration_ms"))
-	case "validate_fail":
-		return fmt.Sprintf("%s校验失败：%s", sectionLabel(item.Payload), firstError(item.Payload))
-	case "section_repair_needed":
-		return fmt.Sprintf("%s规则校验失败（%s）：%s",
-			sectionLabel(item.Payload),
-			errorCountLabel(item.Payload),
-			errorPreview(item.Payload, 0))
-	case "section_item_repair_start":
-		return ""
-	case "section_item_repair_ok":
-		return fmt.Sprintf("%s逐条修复完成", sectionLabel(item.Payload))
-	case "section_item_repair_validate_fail":
-		return fmt.Sprintf("%s逐条修复后仍未通过：%s", sectionLabel(item.Payload), firstError(item.Payload))
-	case "section_whole_repair_start":
-		return ""
-	case "section_whole_repair_ok":
-		return fmt.Sprintf("%s整段修复完成", sectionLabel(item.Payload))
-	case "section_whole_repair_validate_fail":
-		return fmt.Sprintf("%s整段修复后仍未通过：%s", sectionLabel(item.Payload), firstError(item.Payload))
-	case "translate_start":
-		return ""
-	case "translate_ok":
-		return fmt.Sprintf("%s完成（%s）", stepLabel(stringPayload(item.Payload, "step")), durationLabel(item.Payload, "duration_ms"))
 	case "api_request":
 		// 底层 LLM 调用事件不在普通输出展示；可通过 --verbose 查看 NDJSON 细节。
 		return ""
@@ -327,6 +308,32 @@ func renderWorkerTraceLine(item client.JobTraceItem) string {
 		return fmt.Sprintf("执行失败：%s", shortText(stringPayload(item.Payload, "error"), 120))
 	case "generation_ok":
 		return fmt.Sprintf("生成阶段完成（%s）", durationLabel(item.Payload, "timing_ms"))
+	}
+	return genericWorkerTraceLine(item)
+}
+
+func genericWorkerTraceLine(item client.JobTraceItem) string {
+	step := stringPayload(item.Payload, "step")
+	errText := stringPayload(item.Payload, "error")
+	label := sectionLabel(item.Payload)
+	switch {
+	case strings.HasSuffix(item.Event, "_start") && step != "":
+		return ""
+	case strings.Contains(item.Event, "repair_needed"):
+		return fmt.Sprintf("%s规则校验失败（%s）：%s", label, errorCountLabel(item.Payload), errorPreview(item.Payload, 0))
+	case strings.Contains(item.Event, "validate_fail"):
+		return fmt.Sprintf("%s规则校验失败：%s", label, errorPreview(item.Payload, 0))
+	case strings.HasSuffix(item.Event, "_repair_ok"):
+		return fmt.Sprintf("%s修复完成", label)
+	case strings.HasSuffix(item.Event, "_ok") && step != "":
+		return fmt.Sprintf("%s完成（%s）", label, durationLabel(item.Payload, "duration_ms"))
+	case strings.HasSuffix(item.Event, "_failed"):
+		if errText != "" {
+			return fmt.Sprintf("%s失败：%s", eventLabel(item.Event), shortText(errText, 120))
+		}
+		return fmt.Sprintf("%s失败", eventLabel(item.Event))
+	case errText != "":
+		return fmt.Sprintf("%s：%s", eventLabel(item.Event), shortText(errText, 120))
 	default:
 		return ""
 	}
@@ -351,36 +358,23 @@ func tracePrefix(tenantID string, elapsedMs int64) string {
 }
 
 func stepLabel(step string) string {
-	switch step {
-	case "title":
-		return "标题生成"
-	case "bullets":
-		return "五点描述生成"
-	case "description":
-		return "产品描述生成"
-	case "search_terms":
-		return "搜索词生成"
-	case "translate_category":
-		return "分类翻译"
-	case "translate_keywords":
-		return "关键词翻译"
-	case "translate_title":
-		return "标题翻译"
-	case "translate_bullets":
-		return "五点描述翻译"
-	case "translate_description":
-		return "产品描述翻译"
-	case "translate_search_terms":
-		return "搜索词翻译"
-	default:
-		if label, ok := judgeRoundStepLabel(step); ok {
-			return label
-		}
-		if step == "" {
-			return "任务步骤"
-		}
-		return step
+	if step == "" {
+		return "任务步骤"
 	}
+	if label, ok := judgeRoundStepLabel(step); ok {
+		return label
+	}
+	if strings.HasPrefix(step, "translate_") {
+		return sectionDisplayName(strings.TrimPrefix(step, "translate_")) + "翻译"
+	}
+	if idx := strings.Index(step, "_attempt_"); idx > 0 {
+		return stepLabel(step[:idx])
+	}
+	if strings.HasSuffix(step, "_whole_repair") {
+		base := strings.TrimSuffix(step, "_whole_repair")
+		return stepLabel(base) + "整段修复"
+	}
+	return sectionDisplayName(step)
 }
 
 func judgeRoundStepLabel(step string) (string, bool) {
@@ -396,23 +390,33 @@ func judgeRoundStepLabel(step string) (string, bool) {
 	if err != nil || round <= 0 {
 		return "", false
 	}
-	var sectionName string
-	switch parts[0] {
-	case "title":
-		sectionName = "标题"
-	case "bullets":
-		sectionName = "五点描述"
-	case "description":
-		sectionName = "产品描述"
-	case "search_terms":
-		sectionName = "搜索词"
-	default:
-		return "", false
-	}
+	sectionName := sectionDisplayName(parts[0])
 	return fmt.Sprintf("%s一致性修复（第%d轮）", sectionName, round), true
 }
 
+func sectionDisplayName(token string) string {
+	clean := strings.TrimSpace(strings.ReplaceAll(token, "_", " "))
+	if clean == "" {
+		return "步骤"
+	}
+	return clean
+}
+
+func eventLabel(name string) string {
+	clean := strings.TrimSpace(strings.ReplaceAll(name, "_", " "))
+	if clean == "" {
+		return "事件"
+	}
+	return clean
+}
+
 func sectionLabel(payload map[string]any) string {
+	if label := stringPayload(payload, "label"); strings.TrimSpace(label) != "" {
+		return strings.TrimSpace(label)
+	}
+	if label := stringPayload(payload, "display"); strings.TrimSpace(label) != "" {
+		return strings.TrimSpace(label)
+	}
 	step := stringPayload(payload, "step")
 	if step != "" {
 		return stepLabel(step)

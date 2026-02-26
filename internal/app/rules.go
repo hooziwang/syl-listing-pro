@@ -28,9 +28,6 @@ func RunUpdateRules(ctx context.Context, opts UpdateRulesOptions) error {
 	if err != nil {
 		return err
 	}
-	if opts.Force {
-		_ = rules.Clear(cacheDir)
-	}
 	api := client.New(workerBaseURL)
 	api.SetTrace(func(ev client.TraceEvent) {
 		log.Event("worker_http_"+ev.Stage, map[string]any{
@@ -47,7 +44,10 @@ func RunUpdateRules(ctx context.Context, opts UpdateRulesOptions) error {
 	if err != nil {
 		return err
 	}
-	st, err := rules.LoadState(cacheDir)
+	if opts.Force {
+		_ = rules.Clear(cacheDir, ex.TenantID)
+	}
+	st, err := rules.LoadState(cacheDir, ex.TenantID)
 	if err != nil {
 		return err
 	}
@@ -60,6 +60,25 @@ func RunUpdateRules(ctx context.Context, opts UpdateRulesOptions) error {
 		return fmt.Errorf("规则中心不可达且本地无规则缓存")
 	}
 	if res.UpToDate {
+		if !rules.HasArchive(st.ArchivePath) {
+			data, gotSHA, err := api.Download(ctx, ex.AccessToken, res.DownloadURL)
+			if err != nil {
+				return err
+			}
+			if gotSHA != res.ManifestSHA {
+				return fmt.Errorf("规则包 sha256 不匹配: got=%s want=%s", gotSHA, res.ManifestSHA)
+			}
+			p, err := rules.SaveArchive(cacheDir, ex.TenantID, res.RulesVersion, data)
+			if err != nil {
+				return err
+			}
+			if err := rules.VerifySignatureOpenSSL(cacheDir, res.SignatureBase64, p); err != nil {
+				return err
+			}
+			if err := rules.SaveState(cacheDir, ex.TenantID, rules.CacheState{RulesVersion: res.RulesVersion, ManifestSHA: res.ManifestSHA, ArchivePath: p}); err != nil {
+				return err
+			}
+		}
 		fmt.Println(res.RulesVersion)
 		return nil
 	}
@@ -70,14 +89,14 @@ func RunUpdateRules(ctx context.Context, opts UpdateRulesOptions) error {
 	if gotSHA != res.ManifestSHA {
 		return fmt.Errorf("规则包 sha256 不匹配: got=%s want=%s", gotSHA, res.ManifestSHA)
 	}
-	p, err := rules.SaveArchive(cacheDir, res.RulesVersion, data)
+	p, err := rules.SaveArchive(cacheDir, ex.TenantID, res.RulesVersion, data)
 	if err != nil {
 		return err
 	}
 	if err := rules.VerifySignatureOpenSSL(cacheDir, res.SignatureBase64, p); err != nil {
 		return err
 	}
-	if err := rules.SaveState(cacheDir, rules.CacheState{RulesVersion: res.RulesVersion, ManifestSHA: res.ManifestSHA, ArchivePath: p}); err != nil {
+	if err := rules.SaveState(cacheDir, ex.TenantID, rules.CacheState{RulesVersion: res.RulesVersion, ManifestSHA: res.ManifestSHA, ArchivePath: p}); err != nil {
 		return err
 	}
 	fmt.Println(res.RulesVersion)

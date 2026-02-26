@@ -9,14 +9,16 @@ import (
 	"strings"
 )
 
-const Marker = "===Listing Requirements==="
-
 type RequirementFile struct {
 	Path    string
 	Content string
 }
 
-func Discover(inputs []string) ([]RequirementFile, error) {
+func Discover(inputs []string, marker string) ([]RequirementFile, error) {
+	marker = strings.TrimSpace(marker)
+	if marker == "" {
+		return nil, fmt.Errorf("规则中未定义输入识别标记")
+	}
 	var out []RequirementFile
 	seen := map[string]struct{}{}
 	for _, in := range inputs {
@@ -32,7 +34,7 @@ func Discover(inputs []string) ([]RequirementFile, error) {
 				if d.IsDir() {
 					return nil
 				}
-				ok, content, err := readIfRequirement(path)
+				ok, content, err := readIfRequirement(path, marker)
 				if err != nil {
 					return err
 				}
@@ -49,7 +51,7 @@ func Discover(inputs []string) ([]RequirementFile, error) {
 			}
 			continue
 		}
-		ok, content, err := readIfRequirement(in)
+		ok, content, err := readIfRequirement(in, marker)
 		if err != nil {
 			return nil, err
 		}
@@ -61,12 +63,12 @@ func Discover(inputs []string) ([]RequirementFile, error) {
 		}
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("未发现 listing 要求文件（首行需为 %s）", Marker)
+		return nil, fmt.Errorf("未发现 listing 要求文件（首行需为 %s）", marker)
 	}
 	return out, nil
 }
 
-func readIfRequirement(path string) (bool, string, error) {
+func readIfRequirement(path string, marker string) (bool, string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return false, "", err
@@ -77,7 +79,7 @@ func readIfRequirement(path string) (bool, string, error) {
 	if err != nil && err != io.EOF {
 		return false, "", err
 	}
-	if strings.TrimSpace(strings.TrimPrefix(line1, "\ufeff")) != Marker {
+	if strings.TrimSpace(strings.TrimPrefix(line1, "\ufeff")) != marker {
 		return false, "", nil
 	}
 	rest, err := io.ReadAll(r)
