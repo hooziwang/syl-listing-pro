@@ -39,3 +39,28 @@ type ResultResp struct {
 	ValidationReport []string `json:"validation_report"`
 	TimingMS         int64    `json:"timing_ms"`
 }
+
+type JobTraceItem struct {
+	TS        string         `json:"ts"`
+	Source    string         `json:"source"`
+	Event     string         `json:"event"`
+	Level     string         `json:"level,omitempty"`
+	TenantID  string         `json:"tenant_id"`
+	JobID     string         `json:"job_id"`
+	ElapsedMS int64          `json:"elapsed_ms"`
+	ReqID     string         `json:"req_id,omitempty"`
+	Payload   map[string]any `json:"payload,omitempty"`
+}
+
+type JobTraceResp struct {
+	OK         bool           `json:"ok"`
+	JobID      string         `json:"job_id"`
+	JobStatus  string         `json:"job_status"`
+	TenantID   string         `json:"tenant_id"`
+	TraceCount int            `json:"trace_count"`
+	Limit      int            `json:"limit"`
+	Offset     int            `json:"offset"`
+	NextOffset int            `json:"next_offset"`
+	HasMore    bool           `json:"has_more"`
+	Items      []JobTraceItem `json:"items"`
+}

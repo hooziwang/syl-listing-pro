@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
+	"strings"
 	"time"
 
 	"syl-listing-pro/internal/client"
@@ -100,66 +100,118 @@ RULE_SYNC_DONE:
 	success := 0
 	failed := 0
 	for _, f := range files {
-		base := filepath.Base(f.Path)
 		for i := 1; i <= opts.Num; i++ {
-			label := fmt.Sprintf("[%s", base)
-			if opts.Num > 1 {
-				label += fmt.Sprintf("#%d", i)
-			}
-			label += "]"
+			tenantForLog := ex.TenantID
+			var elapsedForLog int64
 
-			log.Info(fmt.Sprintf("%s 开始提交生成任务", label))
 			resp, err := api.Generate(ctx, ex.AccessToken, client.GenerateReq{InputMarkdown: f.Content, CandidateCount: 1})
 			if err != nil {
 				failed++
-				log.Info(fmt.Sprintf("%s 生成失败：%v", label, err))
+				log.Info(fmt.Sprintf("%s 生成失败：%v", tracePrefix(tenantForLog, elapsedForLog), err))
 				continue
+			}
+
+			traceOffset := 0
+			traceWarned := false
+			drainTrace := func() {
+				for i := 0; i < 3; i++ {
+					tr, trErr := api.JobTrace(ctx, ex.AccessToken, resp.JobID, traceOffset, 300)
+					if trErr != nil {
+						if opts.Verbose {
+							log.Event("worker_trace_error", map[string]any{
+								"job_id": resp.JobID,
+								"error":  trErr.Error(),
+							})
+						} else if !traceWarned {
+							traceWarned = true
+							log.Info(fmt.Sprintf("%s 过程拉取失败，继续执行：%v", tracePrefix(tenantForLog, elapsedForLog), trErr))
+						}
+						return
+					}
+					traceWarned = false
+					if len(tr.Items) == 0 {
+						traceOffset = tr.NextOffset
+						return
+					}
+					traceOffset = tr.NextOffset
+					for _, item := range tr.Items {
+						if strings.TrimSpace(item.TenantID) != "" {
+							tenantForLog = item.TenantID
+						}
+						if item.ElapsedMS >= 0 {
+							elapsedForLog = item.ElapsedMS
+						}
+						if opts.Verbose {
+							log.Event("worker_trace", map[string]any{
+								"job_id":     item.JobID,
+								"tenant_id":  item.TenantID,
+								"ts":         item.TS,
+								"elapsed_ms": item.ElapsedMS,
+								"source":     item.Source,
+								"event_name": item.Event,
+								"level":      item.Level,
+								"req_id":     item.ReqID,
+								"payload":    item.Payload,
+							})
+						}
+						msg := renderWorkerTraceLine(item)
+						if strings.TrimSpace(msg) != "" {
+							log.Info(fmt.Sprintf("%s %s", tracePrefix(tenantForLog, elapsedForLog), msg))
+						}
+					}
+					if !tr.HasMore {
+						return
+					}
+				}
 			}
 
 			deadline := time.Now().Add(time.Duration(pollTimeoutSecond) * time.Second)
 			for {
+				drainTrace()
 				if time.Now().After(deadline) {
 					failed++
-					log.Info(fmt.Sprintf("%s 生成失败：轮询超时", label))
+					log.Info(fmt.Sprintf("%s 生成失败：轮询超时", tracePrefix(tenantForLog, elapsedForLog)))
 					break
 				}
 				stResp, err := api.Job(ctx, ex.AccessToken, resp.JobID)
 				if err != nil {
 					failed++
-					log.Info(fmt.Sprintf("%s 生成失败：%v", label, err))
+					log.Info(fmt.Sprintf("%s 生成失败：%v", tracePrefix(tenantForLog, elapsedForLog), err))
 					break
 				}
 				if stResp.Status == "succeeded" {
+					drainTrace()
 					resData, err := api.Result(ctx, ex.AccessToken, resp.JobID)
 					if err != nil {
 						failed++
-						log.Info(fmt.Sprintf("%s 生成失败：读取结果失败: %v", label, err))
+						log.Info(fmt.Sprintf("%s 生成失败：读取结果失败: %v", tracePrefix(tenantForLog, elapsedForLog), err))
 						break
 					}
 					_, enPath, cnPath, err := output.UniquePair(opts.OutputDir)
 					if err != nil {
 						failed++
-						log.Info(fmt.Sprintf("%s 生成失败：输出文件名失败: %v", label, err))
+						log.Info(fmt.Sprintf("%s 生成失败：输出文件名失败: %v", tracePrefix(tenantForLog, elapsedForLog), err))
 						break
 					}
 					if err := os.WriteFile(enPath, []byte(resData.ENMarkdown), 0o644); err != nil {
 						failed++
-						log.Info(fmt.Sprintf("%s 生成失败：写 EN 失败: %v", label, err))
+						log.Info(fmt.Sprintf("%s 生成失败：写 EN 失败: %v", tracePrefix(tenantForLog, elapsedForLog), err))
 						break
 					}
 					if err := os.WriteFile(cnPath, []byte(resData.CNMarkdown), 0o644); err != nil {
 						failed++
-						log.Info(fmt.Sprintf("%s 生成失败：写 CN 失败: %v", label, err))
+						log.Info(fmt.Sprintf("%s 生成失败：写 CN 失败: %v", tracePrefix(tenantForLog, elapsedForLog), err))
 						break
 					}
 					success++
-					log.Info(fmt.Sprintf("%s EN 已写入：%s", label, enPath))
-					log.Info(fmt.Sprintf("%s CN 已写入：%s", label, cnPath))
+					log.Info(fmt.Sprintf("%s EN 已写入：%s", tracePrefix(tenantForLog, elapsedForLog), enPath))
+					log.Info(fmt.Sprintf("%s CN 已写入：%s", tracePrefix(tenantForLog, elapsedForLog), cnPath))
 					break
 				}
 				if stResp.Status == "failed" {
+					drainTrace()
 					failed++
-					log.Info(fmt.Sprintf("%s 生成失败：%s", label, stResp.Error))
+					log.Info(fmt.Sprintf("%s 生成失败：%s", tracePrefix(tenantForLog, elapsedForLog), stResp.Error))
 					break
 				}
 				time.Sleep(time.Duration(pollIntervalMs) * time.Millisecond)
@@ -172,4 +224,214 @@ RULE_SYNC_DONE:
 		return fmt.Errorf("存在失败任务")
 	}
 	return nil
+}
+
+func renderWorkerTraceLine(item client.JobTraceItem) string {
+	if item.Source == "api" {
+		switch item.Event {
+		case "job_status_read", "job_result_not_ready":
+			return ""
+		}
+	}
+	switch item.Event {
+	case "generate_queued":
+		return "任务已入队"
+	case "job_started":
+		attempt := intPayload(item.Payload, "queue_attempt")
+		maxAttempts := intPayload(item.Payload, "queue_max_attempts")
+		if attempt > 0 && maxAttempts > 0 {
+			return fmt.Sprintf("开始执行（第 %d/%d 次）", attempt, maxAttempts)
+		}
+		return "开始执行"
+	case "job_rules_resolved":
+		return fmt.Sprintf("规则解析完成（%s）", stringPayload(item.Payload, "rules_version"))
+	case "generation_start":
+		return fmt.Sprintf("开始生成（规则=%s）", stringPayload(item.Payload, "rules_version"))
+	case "rules_loaded":
+		return fmt.Sprintf("规则已加载（%s）", stringPayload(item.Payload, "rules_version"))
+	case "section_generate_start":
+		return fmt.Sprintf("开始%s（第%d次）", sectionLabel(item.Payload), intPayload(item.Payload, "attempt"))
+	case "section_generate_ok":
+		return fmt.Sprintf("%s完成（%s）", sectionLabel(item.Payload), durationLabel(item.Payload, "duration_ms"))
+	case "validate_fail":
+		return fmt.Sprintf("%s校验失败：%s", sectionLabel(item.Payload), firstError(item.Payload))
+	case "section_repair_needed":
+		return fmt.Sprintf("%s规则校验失败：%s", sectionLabel(item.Payload), firstError(item.Payload))
+	case "section_item_repair_start":
+		return fmt.Sprintf("%s开始逐条修复（第%d轮）",
+			sectionLabel(item.Payload),
+			intPayload(item.Payload, "round"))
+	case "section_item_repair_ok":
+		return fmt.Sprintf("%s逐条修复完成", sectionLabel(item.Payload))
+	case "section_item_repair_validate_fail":
+		return fmt.Sprintf("%s逐条修复后仍未通过：%s", sectionLabel(item.Payload), firstError(item.Payload))
+	case "section_whole_repair_start":
+		return fmt.Sprintf("%s开始整段修复", sectionLabel(item.Payload))
+	case "section_whole_repair_ok":
+		return fmt.Sprintf("%s整段修复完成", sectionLabel(item.Payload))
+	case "section_whole_repair_validate_fail":
+		return fmt.Sprintf("%s整段修复后仍未通过：%s", sectionLabel(item.Payload), firstError(item.Payload))
+	case "translate_start":
+		return fmt.Sprintf("开始%s", stepLabel(stringPayload(item.Payload, "step")))
+	case "translate_ok":
+		return fmt.Sprintf("%s完成（%s）", stepLabel(stringPayload(item.Payload, "step")), durationLabel(item.Payload, "duration_ms"))
+	case "api_request":
+		provider := stringPayload(item.Payload, "provider")
+		step := stringPayload(item.Payload, "step")
+		attempt := intPayload(item.Payload, "attempt")
+		if provider != "" && step != "" && attempt > 0 {
+			return fmt.Sprintf("调用 %s：%s（第%d次）", provider, step, attempt)
+		}
+		return ""
+	case "api_retry":
+		return fmt.Sprintf("调用重试：%s %s（第%d次，等待 %s）：%s",
+			stringPayload(item.Payload, "provider"),
+			stringPayload(item.Payload, "step"),
+			intPayload(item.Payload, "attempt"),
+			durationLabel(item.Payload, "wait_ms"),
+			shortText(stringPayload(item.Payload, "error"), 80))
+	case "api_failed":
+		return fmt.Sprintf("调用失败：%s %s（status=%d）：%s",
+			stringPayload(item.Payload, "provider"),
+			stringPayload(item.Payload, "step"),
+			intPayload(item.Payload, "status_code"),
+			shortText(stringPayload(item.Payload, "error_body"), 80))
+	case "job_retry_scheduled":
+		return fmt.Sprintf("任务重试计划：第 %d/%d 次失败，准备第 %d 次（等待由队列退避控制）：%s",
+			intPayload(item.Payload, "attempt"),
+			intPayload(item.Payload, "max_attempts"),
+			intPayload(item.Payload, "next_attempt"),
+			shortText(stringPayload(item.Payload, "error"), 100))
+	case "job_succeeded":
+		return fmt.Sprintf("执行完成（%s）", durationLabel(item.Payload, "duration_ms"))
+	case "job_failed":
+		return fmt.Sprintf("执行失败：%s", shortText(stringPayload(item.Payload, "error"), 120))
+	case "generation_ok":
+		return fmt.Sprintf("生成阶段完成（%s）", durationLabel(item.Payload, "timing_ms"))
+	default:
+		return ""
+	}
+}
+
+func tracePrefix(tenantID string, elapsedMs int64) string {
+	tenant := strings.TrimSpace(tenantID)
+	if tenant == "" {
+		tenant = "-"
+	}
+	if elapsedMs < 0 {
+		elapsedMs = 0
+	}
+	totalSec := elapsedMs / 1000
+	hh := totalSec / 3600
+	mm := (totalSec % 3600) / 60
+	ss := totalSec % 60
+	if hh > 0 {
+		return fmt.Sprintf("[%s:%02d:%02d:%02d]", tenant, hh, mm, ss)
+	}
+	return fmt.Sprintf("[%s:%02d:%02d]", tenant, mm, ss)
+}
+
+func stepLabel(step string) string {
+	switch step {
+	case "title":
+		return "英文标题生成"
+	case "bullets":
+		return "英文五点描述生成"
+	case "description":
+		return "英文产品描述生成"
+	case "search_terms":
+		return "英文搜索词生成"
+	case "translate_category":
+		return "中文分类翻译"
+	case "translate_keywords":
+		return "中文关键词翻译"
+	case "translate_title":
+		return "中文标题翻译"
+	case "translate_bullets":
+		return "中文五点描述翻译"
+	case "translate_description":
+		return "中文产品描述翻译"
+	case "translate_search_terms":
+		return "中文搜索词翻译"
+	default:
+		if step == "" {
+			return "任务步骤"
+		}
+		return step
+	}
+}
+
+func sectionLabel(payload map[string]any) string {
+	step := stringPayload(payload, "step")
+	if step != "" {
+		return stepLabel(step)
+	}
+	section := stringPayload(payload, "section")
+	if section == "" {
+		return "步骤"
+	}
+	return stepLabel(section)
+}
+
+func intPayload(payload map[string]any, key string) int {
+	v, ok := payload[key]
+	if !ok {
+		return 0
+	}
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	case int64:
+		return int(n)
+	default:
+		return 0
+	}
+}
+
+func stringPayload(payload map[string]any, key string) string {
+	v, ok := payload[key]
+	if !ok || v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return fmt.Sprintf("%v", v)
+}
+
+func firstError(payload map[string]any) string {
+	v, ok := payload["errors"]
+	if !ok || v == nil {
+		return "未知错误"
+	}
+	if arr, ok := v.([]any); ok && len(arr) > 0 {
+		return shortText(fmt.Sprintf("%v", arr[0]), 140)
+	}
+	if arr, ok := v.([]string); ok && len(arr) > 0 {
+		return shortText(arr[0], 140)
+	}
+	return shortText(fmt.Sprintf("%v", v), 140)
+}
+
+func durationLabel(payload map[string]any, key string) string {
+	ms := intPayload(payload, key)
+	if ms <= 0 {
+		return "-"
+	}
+	if ms >= 60_000 {
+		return fmt.Sprintf("%.2fm", float64(ms)/60_000.0)
+	}
+	if ms >= 1_000 {
+		return fmt.Sprintf("%.2fs", float64(ms)/1_000.0)
+	}
+	return fmt.Sprintf("%dms", ms)
+}
+
+func shortText(s string, n int) string {
+	if n <= 0 || len(s) <= n {
+		return s
+	}
+	return strings.TrimSpace(s[:n]) + "..."
 }

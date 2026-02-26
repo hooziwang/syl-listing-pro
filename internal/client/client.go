@@ -197,6 +197,35 @@ func (a *API) Job(ctx context.Context, token, jobID string) (JobStatusResp, erro
 	return out, nil
 }
 
+func (a *API) JobTrace(ctx context.Context, token, jobID string, offset, limit int) (JobTraceResp, error) {
+	u, err := url.Parse(a.baseURL)
+	if err != nil {
+		return JobTraceResp{}, err
+	}
+	u.Path = path.Join(u.Path, "/v1/jobs/"+jobID+"/trace")
+	q := u.Query()
+	if offset > 0 {
+		q.Set("offset", fmt.Sprintf("%d", offset))
+	}
+	if limit > 0 {
+		q.Set("limit", fmt.Sprintf("%d", limit))
+	}
+	u.RawQuery = q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return JobTraceResp{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	var out JobTraceResp
+	if err := a.doJSONWithRetry(ctx, jobPollMaxAttempts, func() (*http.Request, error) {
+		return cloneRequest(req)
+	}, &out); err != nil {
+		return JobTraceResp{}, err
+	}
+	return out, nil
+}
+
 func (a *API) Result(ctx context.Context, token, jobID string) (ResultResp, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.baseURL+"/v1/jobs/"+jobID+"/result", nil)
 	if err != nil {
