@@ -276,6 +276,10 @@ func renderWorkerTraceLine(item client.JobTraceItem) string {
 		return ""
 	case "rules_loaded":
 		return fmt.Sprintf("规则已加载 %s", stringPayload(item.Payload, "rules_version"))
+	case "planning_ok":
+		return fmt.Sprintf("生成策略规划完成（%s）", durationLabel(item.Payload, "duration_ms"))
+	case "planning_failed":
+		return "生成策略规划失败，继续执行默认流程"
 	case "section_generate_start":
 		return ""
 	case "section_generate_ok":
