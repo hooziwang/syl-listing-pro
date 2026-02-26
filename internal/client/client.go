@@ -6,8 +6,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
@@ -33,12 +35,36 @@ type API struct {
 	trace   func(TraceEvent)
 }
 
+const (
+	exchangeMaxAttempts   = 5
+	exchangeBackoffBase   = 300 * time.Millisecond
+	connectTimeout        = 10 * time.Second
+	tlsHandshakeTimeout   = 10 * time.Second
+	responseHeaderTimeout = 30 * time.Second
+	expectContinueTimeout = 1 * time.Second
+	keepAliveTimeout      = 30 * time.Second
+	idleConnTimeout       = 90 * time.Second
+	maxIdleConns          = 100
+	maxIdleConnsPerHost   = 10
+)
+
 func New(baseURL string) *API {
+	dialer := &net.Dialer{
+		Timeout:   connectTimeout,
+		KeepAlive: keepAliveTimeout,
+	}
 	return &API{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		http: &http.Client{
 			Transport: &http.Transport{
-				Proxy: nil,
+				Proxy:                 http.ProxyFromEnvironment,
+				DialContext:           dialer.DialContext,
+				TLSHandshakeTimeout:   tlsHandshakeTimeout,
+				ResponseHeaderTimeout: responseHeaderTimeout,
+				ExpectContinueTimeout: expectContinueTimeout,
+				IdleConnTimeout:       idleConnTimeout,
+				MaxIdleConns:          maxIdleConns,
+				MaxIdleConnsPerHost:   maxIdleConnsPerHost,
 			},
 			Timeout: 120 * time.Second,
 		},
@@ -83,16 +109,40 @@ func traceBody(b []byte) string {
 }
 
 func (a *API) Exchange(ctx context.Context, sylKey string) (ExchangeResp, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.baseURL+"/v1/auth/exchange", nil)
-	if err != nil {
-		return ExchangeResp{}, err
+	url := a.baseURL + "/v1/auth/exchange"
+	for attempt := 1; attempt <= exchangeMaxAttempts; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+		if err != nil {
+			return ExchangeResp{}, err
+		}
+		req.Header.Set("Authorization", "Bearer "+sylKey)
+
+		var out ExchangeResp
+		if err := a.doJSON(req, &out); err != nil {
+			if !isRetryableExchangeErr(err) || attempt == exchangeMaxAttempts {
+				return ExchangeResp{}, err
+			}
+			backoff := exchangeBackoff(attempt)
+			a.emitTrace(TraceEvent{
+				Stage:      "retry",
+				Method:     http.MethodPost,
+				URL:        url,
+				DurationMs: backoff.Milliseconds(),
+				Error:      err.Error(),
+				Request:    fmt.Sprintf(`{"attempt":%d,"next_attempt":%d}`, attempt, attempt+1),
+			})
+			timer := time.NewTimer(backoff)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ExchangeResp{}, ctx.Err()
+			case <-timer.C:
+			}
+			continue
+		}
+		return out, nil
 	}
-	req.Header.Set("Authorization", "Bearer "+sylKey)
-	var out ExchangeResp
-	if err := a.doJSON(req, &out); err != nil {
-		return ExchangeResp{}, err
-	}
-	return out, nil
+	return ExchangeResp{}, fmt.Errorf("auth exchange failed")
 }
 
 func (a *API) ResolveRules(ctx context.Context, token, current string) (RulesResolveResp, error) {
@@ -246,4 +296,44 @@ func (a *API) doJSON(req *http.Request, out any) error {
 		return fmt.Errorf("解析响应失败: %w", err)
 	}
 	return nil
+}
+
+func exchangeBackoff(attempt int) time.Duration {
+	if attempt <= 0 {
+		return exchangeBackoffBase
+	}
+	d := exchangeBackoffBase * time.Duration(1<<(attempt-1))
+	if d > 4*time.Second {
+		return 4 * time.Second
+	}
+	return d
+}
+
+func isRetryableExchangeErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	retryable := []string{
+		"timeout",
+		"tls handshake",
+		"connection reset",
+		"connection refused",
+		"broken pipe",
+		"unexpected eof",
+		"eof",
+	}
+	for _, key := range retryable {
+		if strings.Contains(msg, key) {
+			return true
+		}
+	}
+	return false
 }
