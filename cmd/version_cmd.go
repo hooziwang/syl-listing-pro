@@ -1,15 +1,11 @@
 package cmd
 
-import (
-	"fmt"
-
-	"github.com/spf13/cobra"
-)
+import "github.com/spf13/cobra"
 
 var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "显示版本信息",
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Printf("%s (commit=%s build=%s)\n", Version, Commit, BuildTime)
+		printVersion(cmd.OutOrStdout())
 	},
 }

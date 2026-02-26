@@ -15,7 +15,7 @@ var setKeyCmd = &cobra.Command{
 	Short: "设置 SYL_LISTING_KEY",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return app.RunSetKey(cmd.Context(), cfgPath, args[0])
+		return app.RunSetKey(cmd.Context(), args[0])
 	},
 }
 

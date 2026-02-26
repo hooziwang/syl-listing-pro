@@ -14,7 +14,7 @@ var updateRulesCmd = &cobra.Command{
 	Use:   "rules",
 	Short: "清除本地规则缓存并下载最新规则",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return app.RunUpdateRules(cmd.Context(), app.UpdateRulesOptions{ConfigPath: cfgPath, Verbose: verbose, Force: true})
+		return app.RunUpdateRules(cmd.Context(), app.UpdateRulesOptions{Verbose: verbose, LogFile: logFile, Force: true})
 	},
 }
 

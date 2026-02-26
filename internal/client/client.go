@@ -13,20 +13,73 @@ import (
 	"path"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
+
+type TraceEvent struct {
+	Stage      string
+	Method     string
+	URL        string
+	StatusCode int
+	DurationMs int64
+	Request    string
+	Response   string
+	Error      string
+}
 
 type API struct {
 	baseURL string
 	http    *http.Client
+	trace   func(TraceEvent)
 }
 
 func New(baseURL string) *API {
 	return &API{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		http: &http.Client{
+			Transport: &http.Transport{
+				Proxy: nil,
+			},
 			Timeout: 120 * time.Second,
 		},
 	}
+}
+
+func (a *API) SetTrace(fn func(TraceEvent)) {
+	a.trace = fn
+}
+
+func (a *API) emitTrace(ev TraceEvent) {
+	if a.trace != nil {
+		a.trace(ev)
+	}
+}
+
+func readReqBody(req *http.Request) string {
+	if req == nil || req.GetBody == nil {
+		return ""
+	}
+	rc, err := req.GetBody()
+	if err != nil {
+		return ""
+	}
+	defer rc.Close()
+	b, err := io.ReadAll(io.LimitReader(rc, 2<<20))
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+func traceBody(b []byte) string {
+	if len(b) == 0 {
+		return ""
+	}
+	if utf8.Valid(b) {
+		return string(b)
+	}
+	sum := sha256.Sum256(b)
+	return fmt.Sprintf("<binary bytes=%d sha256=%s>", len(b), hex.EncodeToString(sum[:]))
 }
 
 func (a *API) Exchange(ctx context.Context, sylKey string) (ExchangeResp, error) {
@@ -34,7 +87,7 @@ func (a *API) Exchange(ctx context.Context, sylKey string) (ExchangeResp, error)
 	if err != nil {
 		return ExchangeResp{}, err
 	}
-	req.Header.Set("X-SYL-KEY", sylKey)
+	req.Header.Set("Authorization", "Bearer "+sylKey)
 	var out ExchangeResp
 	if err := a.doJSON(req, &out); err != nil {
 		return ExchangeResp{}, err
@@ -113,30 +166,76 @@ func (a *API) Download(ctx context.Context, token, rawURL string) ([]byte, strin
 		return nil, "", err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
+	reqBody := readReqBody(req)
+	a.emitTrace(TraceEvent{
+		Stage:   "request",
+		Method:  req.Method,
+		URL:     req.URL.String(),
+		Request: reqBody,
+	})
+	start := time.Now()
 	resp, err := a.http.Do(req)
 	if err != nil {
+		a.emitTrace(TraceEvent{
+			Stage:      "error",
+			Method:     req.Method,
+			URL:        req.URL.String(),
+			DurationMs: time.Since(start).Milliseconds(),
+			Request:    reqBody,
+			Error:      err.Error(),
+		})
 		return nil, "", err
 	}
 	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	a.emitTrace(TraceEvent{
+		Stage:      "response",
+		Method:     req.Method,
+		URL:        req.URL.String(),
+		StatusCode: resp.StatusCode,
+		DurationMs: time.Since(start).Milliseconds(),
+		Request:    reqBody,
+		Response:   traceBody(body),
+	})
 	if resp.StatusCode/100 != 2 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, "", fmt.Errorf("下载失败: %s %s", resp.Status, strings.TrimSpace(string(b)))
+		return nil, "", fmt.Errorf("下载失败: %s %s", resp.Status, strings.TrimSpace(string(body)))
 	}
-	b, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, "", err
-	}
-	h := sha256.Sum256(b)
-	return b, hex.EncodeToString(h[:]), nil
+	h := sha256.Sum256(body)
+	return body, hex.EncodeToString(h[:]), nil
 }
 
 func (a *API) doJSON(req *http.Request, out any) error {
+	reqBody := readReqBody(req)
+	a.emitTrace(TraceEvent{
+		Stage:   "request",
+		Method:  req.Method,
+		URL:     req.URL.String(),
+		Request: reqBody,
+	})
+	start := time.Now()
 	resp, err := a.http.Do(req)
 	if err != nil {
+		a.emitTrace(TraceEvent{
+			Stage:      "error",
+			Method:     req.Method,
+			URL:        req.URL.String(),
+			DurationMs: time.Since(start).Milliseconds(),
+			Request:    reqBody,
+			Error:      err.Error(),
+		})
 		return err
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	a.emitTrace(TraceEvent{
+		Stage:      "response",
+		Method:     req.Method,
+		URL:        req.URL.String(),
+		StatusCode: resp.StatusCode,
+		DurationMs: time.Since(start).Milliseconds(),
+		Request:    reqBody,
+		Response:   traceBody(body),
+	})
 	if resp.StatusCode/100 != 2 {
 		return fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}

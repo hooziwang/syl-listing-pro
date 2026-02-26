@@ -9,10 +9,11 @@ import (
 )
 
 var (
-	cfgPath string
-	verbose bool
-	outDir  string
-	num     int
+	verbose     bool
+	logFile     string
+	outDir      string
+	num         int
+	showVersion bool
 )
 
 var rootCmd = &cobra.Command{
@@ -20,15 +21,19 @@ var rootCmd = &cobra.Command{
 	Short: "生成双语 listing（新架构 CLI）",
 	Args:  cobra.ArbitraryArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if showVersion {
+			printVersion(cmd.OutOrStdout())
+			return nil
+		}
 		if len(args) == 0 {
 			return cmd.Help()
 		}
 		opts := app.GenOptions{
-			ConfigPath: cfgPath,
-			Verbose:    verbose,
-			OutputDir:  outDir,
-			Num:        num,
-			Inputs:     args,
+			Verbose:   verbose,
+			LogFile:   logFile,
+			OutputDir: outDir,
+			Num:       num,
+			Inputs:    args,
 		}
 		return app.RunGen(cmd.Context(), opts)
 	},
@@ -44,14 +49,13 @@ func Execute() {
 func init() {
 	rootCmd.SilenceUsage = true
 	rootCmd.SilenceErrors = true
+	rootCmd.CompletionOptions.HiddenDefaultCmd = true
 
-	rootCmd.PersistentFlags().StringVar(&cfgPath, "config", "", "配置文件路径，默认 ~/.syl-listing-pro/config.yaml")
 	rootCmd.PersistentFlags().BoolVar(&verbose, "verbose", false, "输出 NDJSON 详细日志")
+	rootCmd.PersistentFlags().StringVar(&logFile, "log-file", "", "日志文件路径")
 	rootCmd.PersistentFlags().StringVarP(&outDir, "out", "o", ".", "输出目录")
 	rootCmd.PersistentFlags().IntVarP(&num, "num", "n", 1, "每个需求文件生成候选数量")
-	rootCmd.PersistentFlags().BoolP("version", "v", false, "显示版本信息")
-	rootCmd.Version = fmt.Sprintf("%s (commit=%s build=%s)", Version, Commit, BuildTime)
-	rootCmd.SetVersionTemplate("{{.Version}}\n")
+	rootCmd.PersistentFlags().BoolVarP(&showVersion, "version", "v", false, "显示版本信息")
 
 	rootCmd.AddCommand(genCmd)
 	rootCmd.AddCommand(versionCmd)

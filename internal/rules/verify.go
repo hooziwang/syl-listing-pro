@@ -2,15 +2,26 @@ package rules
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 )
 
-func VerifySignatureOpenSSL(cacheDir, publicKeyPath, signatureBase64, archivePath string) error {
-	if publicKeyPath == "" || signatureBase64 == "" {
+func VerifySignatureOpenSSL(cacheDir, signatureBase64, archivePath string) error {
+	if signatureBase64 == "" {
 		return nil
+	}
+	publicKeyPath, err := DefaultPublicKeyPath()
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(publicKeyPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("读取规则公钥失败: %w", err)
 	}
 	sig, err := base64.StdEncoding.DecodeString(signatureBase64)
 	if err != nil {

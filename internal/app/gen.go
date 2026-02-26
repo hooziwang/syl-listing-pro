@@ -8,46 +8,57 @@ import (
 	"time"
 
 	"syl-listing-pro/internal/client"
-	"syl-listing-pro/internal/config"
 	"syl-listing-pro/internal/input"
 	"syl-listing-pro/internal/output"
 	"syl-listing-pro/internal/rules"
 )
 
 type GenOptions struct {
-	ConfigPath string
-	Verbose    bool
-	OutputDir  string
-	Num        int
-	Inputs     []string
+	Verbose   bool
+	LogFile   string
+	OutputDir string
+	Num       int
+	Inputs    []string
 }
 
 func RunGen(ctx context.Context, opts GenOptions) error {
 	if opts.Num <= 0 {
 		opts.Num = 1
 	}
-	cfgPath, err := config.ResolvePath(opts.ConfigPath)
+	cacheDir, err := rules.DefaultCacheDir()
 	if err != nil {
 		return err
 	}
-	cfg, err := config.LoadOrInit(cfgPath)
+	sylKey, err := loadSYLKeyForRun()
 	if err != nil {
 		return err
 	}
-	if cfg.Auth.SYLListingKey == "" {
-		return fmt.Errorf("尚未配置 SYL_LISTING_KEY，执行: syl-listing-pro set key <key>")
+	log, err := NewLogger(opts.Verbose, opts.LogFile)
+	if err != nil {
+		return err
 	}
-	log := NewLogger(opts.Verbose)
+	defer func() { _ = log.Close() }()
 	startAll := time.Now()
 
-	api := client.New(cfg.Server.BaseURL)
-	ex, err := api.Exchange(ctx, cfg.Auth.SYLListingKey)
+	api := client.New(workerBaseURL)
+	api.SetTrace(func(ev client.TraceEvent) {
+		log.Event("worker_http_"+ev.Stage, map[string]any{
+			"method":      ev.Method,
+			"url":         ev.URL,
+			"status_code": ev.StatusCode,
+			"duration_ms": ev.DurationMs,
+			"request":     ev.Request,
+			"response":    ev.Response,
+			"error":       ev.Error,
+		})
+	})
+	ex, err := api.Exchange(ctx, sylKey)
 	if err != nil {
 		return err
 	}
 
 	// 启动前同步规则；失败时按策略回退。
-	st, _ := rules.LoadState(cfg.Rules.CacheDir)
+	st, _ := rules.LoadState(cacheDir)
 	res, err := api.ResolveRules(ctx, ex.AccessToken, st.RulesVersion)
 	if err != nil {
 		if st.RulesVersion == "" {
@@ -67,15 +78,15 @@ func RunGen(ctx context.Context, opts GenOptions) error {
 			}
 			log.Info(fmt.Sprintf("规则校验失败，继续使用本地规则（%s）", st.RulesVersion))
 		} else {
-			p, _ := rules.SaveArchive(cfg.Rules.CacheDir, res.RulesVersion, data)
-			if err := rules.VerifySignatureOpenSSL(cfg.Rules.CacheDir, cfg.Rules.PublicKeyPath, res.SignatureBase64, p); err != nil {
+			p, _ := rules.SaveArchive(cacheDir, res.RulesVersion, data)
+			if err := rules.VerifySignatureOpenSSL(cacheDir, res.SignatureBase64, p); err != nil {
 				if st.RulesVersion == "" {
 					return fmt.Errorf("首次拉规则签名校验失败: %w", err)
 				}
 				log.Info(fmt.Sprintf("规则签名校验失败，继续使用本地规则（%s）", st.RulesVersion))
 				goto RULE_SYNC_DONE
 			}
-			_ = rules.SaveState(cfg.Rules.CacheDir, rules.CacheState{RulesVersion: res.RulesVersion, ManifestSHA: res.ManifestSHA, ArchivePath: p})
+			_ = rules.SaveState(cacheDir, rules.CacheState{RulesVersion: res.RulesVersion, ManifestSHA: res.ManifestSHA, ArchivePath: p})
 			log.Info(fmt.Sprintf("规则中心：规则中心更新成功（%s）", res.RulesVersion))
 		}
 	}
@@ -105,7 +116,7 @@ RULE_SYNC_DONE:
 				continue
 			}
 
-			deadline := time.Now().Add(time.Duration(cfg.Run.PollTimeoutSecond) * time.Second)
+			deadline := time.Now().Add(time.Duration(pollTimeoutSecond) * time.Second)
 			for {
 				if time.Now().After(deadline) {
 					failed++
@@ -151,7 +162,7 @@ RULE_SYNC_DONE:
 					log.Info(fmt.Sprintf("%s 生成失败：%s", label, stResp.Error))
 					break
 				}
-				time.Sleep(time.Duration(cfg.Run.PollIntervalMs) * time.Millisecond)
+				time.Sleep(time.Duration(pollIntervalMs) * time.Millisecond)
 			}
 		}
 	}

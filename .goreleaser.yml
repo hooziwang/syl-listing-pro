@@ -1,0 +1,79 @@
+version: 2
+
+project_name: syl-listing-pro
+
+builds:
+  - id: syl-listing-pro
+    main: .
+    binary: syl-listing-pro
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - >-
+        -s -w
+        -X syl-listing-pro/cmd.Version={{ .Version }}
+        -X syl-listing-pro/cmd.Commit={{ .Commit }}
+        -X syl-listing-pro/cmd.BuildTime={{ .Date }}
+
+archives:
+  - id: default
+    builds:
+      - syl-listing-pro
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        format: zip
+    files:
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+release:
+  github:
+    owner: hooziwang
+    name: syl-listing-pro
+  prerelease: auto
+
+brews:
+  - name: syl-listing-pro
+    repository:
+      owner: hooziwang
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/hooziwang/syl-listing-pro"
+    description: "多租户亚马逊 Listing 双语生成 CLI"
+    commit_author:
+      name: github-actions[bot]
+      email: 41898282+github-actions[bot]@users.noreply.github.com
+    test: |
+      system "#{bin}/syl-listing-pro", "--version"
+
+scoops:
+  - name: syl-listing-pro
+    repository:
+      owner: hooziwang
+      name: scoop-bucket
+      token: "{{ .Env.SCOOP_BUCKET_GITHUB_TOKEN }}"
+    directory: bucket
+    homepage: "https://github.com/hooziwang/syl-listing-pro"
+    description: "多租户亚马逊 Listing 双语生成 CLI"
+    commit_author:
+      name: github-actions[bot]
+      email: 41898282+github-actions[bot]@users.noreply.github.com

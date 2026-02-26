@@ -11,11 +11,11 @@ var genCmd = &cobra.Command{
 	Args:  cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		opts := app.GenOptions{
-			ConfigPath: cfgPath,
-			Verbose:    verbose,
-			OutputDir:  outDir,
-			Num:        num,
-			Inputs:     args,
+			Verbose:   verbose,
+			LogFile:   logFile,
+			OutputDir: outDir,
+			Num:       num,
+			Inputs:    args,
 		}
 		return app.RunGen(cmd.Context(), opts)
 	},

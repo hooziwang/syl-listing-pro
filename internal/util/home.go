@@ -6,22 +6,18 @@ import (
 	"path/filepath"
 )
 
-func DefaultConfigPath() (string, error) {
+func DefaultAppDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("读取用户目录失败: %w", err)
 	}
-	return filepath.Join(home, ".syl-listing-pro", "config.yaml"), nil
+	return filepath.Join(home, ".syl-listing-pro"), nil
 }
 
-func DefaultCacheDir() (string, error) {
-	base, err := os.UserCacheDir()
+func DefaultEnvPath() (string, error) {
+	base, err := DefaultAppDir()
 	if err != nil {
-		home, e2 := os.UserHomeDir()
-		if e2 != nil {
-			return "", fmt.Errorf("读取缓存目录失败: %w", err)
-		}
-		base = filepath.Join(home, ".cache")
+		return "", err
 	}
-	return filepath.Join(base, "syl-listing-pro", "rules"), nil
+	return filepath.Join(base, ".env"), nil
 }
