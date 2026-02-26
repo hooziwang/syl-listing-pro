@@ -265,24 +265,19 @@ func renderWorkerTraceLine(item client.JobTraceItem) string {
 	switch item.Event {
 	case "generate_queued":
 		if strings.TrimSpace(item.JobID) != "" {
-			return fmt.Sprintf("任务已入队（job_id=%s）", item.JobID)
+			return fmt.Sprintf("任务已加入队列 %s", item.JobID)
 		}
-		return "任务已入队"
+		return "任务已加入队列"
 	case "job_started":
-		attempt := intPayload(item.Payload, "queue_attempt")
-		maxAttempts := intPayload(item.Payload, "queue_max_attempts")
-		if attempt > 0 && maxAttempts > 0 {
-			return fmt.Sprintf("开始执行（第 %d/%d 次）", attempt, maxAttempts)
-		}
-		return "开始执行"
+		return ""
 	case "job_rules_resolved":
-		return fmt.Sprintf("规则解析完成（%s）", stringPayload(item.Payload, "rules_version"))
+		return ""
 	case "generation_start":
-		return fmt.Sprintf("开始生成（规则=%s）", stringPayload(item.Payload, "rules_version"))
+		return ""
 	case "rules_loaded":
-		return fmt.Sprintf("规则已加载（%s）", stringPayload(item.Payload, "rules_version"))
+		return fmt.Sprintf("规则已加载 %s", stringPayload(item.Payload, "rules_version"))
 	case "section_generate_start":
-		return fmt.Sprintf("开始%s（第%d次）", sectionLabel(item.Payload), intPayload(item.Payload, "attempt"))
+		return ""
 	case "section_generate_ok":
 		return fmt.Sprintf("%s完成（%s）", sectionLabel(item.Payload), durationLabel(item.Payload, "duration_ms"))
 	case "validate_fail":
@@ -293,22 +288,19 @@ func renderWorkerTraceLine(item client.JobTraceItem) string {
 			errorCountLabel(item.Payload),
 			errorPreview(item.Payload, 0))
 	case "section_item_repair_start":
-		return fmt.Sprintf("%s开始逐条修复（第%d轮，目标=%s）",
-			sectionLabel(item.Payload),
-			intPayload(item.Payload, "round"),
-			targetsLabel(item.Payload))
+		return ""
 	case "section_item_repair_ok":
 		return fmt.Sprintf("%s逐条修复完成", sectionLabel(item.Payload))
 	case "section_item_repair_validate_fail":
 		return fmt.Sprintf("%s逐条修复后仍未通过：%s", sectionLabel(item.Payload), firstError(item.Payload))
 	case "section_whole_repair_start":
-		return fmt.Sprintf("%s开始整段修复", sectionLabel(item.Payload))
+		return ""
 	case "section_whole_repair_ok":
 		return fmt.Sprintf("%s整段修复完成", sectionLabel(item.Payload))
 	case "section_whole_repair_validate_fail":
 		return fmt.Sprintf("%s整段修复后仍未通过：%s", sectionLabel(item.Payload), firstError(item.Payload))
 	case "translate_start":
-		return fmt.Sprintf("开始%s", stepLabel(stringPayload(item.Payload, "step")))
+		return ""
 	case "translate_ok":
 		return fmt.Sprintf("%s完成（%s）", stepLabel(stringPayload(item.Payload, "step")), durationLabel(item.Payload, "duration_ms"))
 	case "api_request":
@@ -348,9 +340,9 @@ func tracePrefix(tenantID string, elapsedMs int64) string {
 	mm := (totalSec % 3600) / 60
 	ss := totalSec % 60
 	if hh > 0 {
-		return fmt.Sprintf("[%s:%02d:%02d:%02d]", tenant, hh, mm, ss)
+		return fmt.Sprintf("%s:%02d:%02d:%02d", tenant, hh, mm, ss)
 	}
-	return fmt.Sprintf("[%s:%02d:%02d]", tenant, mm, ss)
+	return fmt.Sprintf("%s:%02d:%02d", tenant, mm, ss)
 }
 
 func stepLabel(step string) string {
