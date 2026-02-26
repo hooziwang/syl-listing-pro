@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -176,7 +177,7 @@ func RunGen(ctx context.Context, opts GenOptions) error {
 								"payload":    item.Payload,
 							})
 						}
-						msg := renderWorkerTraceLine(item)
+						msg := renderWorkerTraceLine(item, !opts.Verbose)
 						if strings.TrimSpace(msg) != "" {
 							log.Info(fmt.Sprintf("%s %s", tracePrefix(tenantForLog, elapsedForLog), msg))
 						}
@@ -226,8 +227,8 @@ func RunGen(ctx context.Context, opts GenOptions) error {
 						break
 					}
 					success++
-					log.Info(fmt.Sprintf("%s EN 已写入：%s", tracePrefix(tenantForLog, elapsedForLog), enPath))
-					log.Info(fmt.Sprintf("%s CN 已写入：%s", tracePrefix(tenantForLog, elapsedForLog), cnPath))
+					log.Info(fmt.Sprintf("%s EN 已写入：%s", tracePrefix(tenantForLog, elapsedForLog), mustAbsPath(enPath)))
+					log.Info(fmt.Sprintf("%s CN 已写入：%s", tracePrefix(tenantForLog, elapsedForLog), mustAbsPath(cnPath)))
 					break
 				}
 				if stResp.Status == "failed" {
@@ -271,7 +272,7 @@ func shouldSkipVerboseWorkerTrace(item client.JobTraceItem) bool {
 	}
 }
 
-func renderWorkerTraceLine(item client.JobTraceItem) string {
+func renderWorkerTraceLine(item client.JobTraceItem, colorizeLabel bool) string {
 	if item.Source == "api" {
 		switch item.Event {
 		case "job_status_read", "job_result_not_ready":
@@ -289,8 +290,16 @@ func renderWorkerTraceLine(item client.JobTraceItem) string {
 		return "任务已加入队列"
 	case "rules_loaded":
 		return fmt.Sprintf("规则已加载 %s", stringPayload(item.Payload, "rules_version"))
+	case "section_generate_ok":
+		step := stringPayload(item.Payload, "step")
+		if _, ok := judgeRoundOfStep(step); ok {
+			return fmt.Sprintf("%s完成%s", sectionLabel(item.Payload, colorizeLabel), tailDuration(item.Payload, "duration_ms", colorizeLabel))
+		}
+		return fmt.Sprintf("%s已生成%s", sectionLabel(item.Payload, colorizeLabel), tailDuration(item.Payload, "duration_ms", colorizeLabel))
 	case "api_request":
 		// 底层 LLM 调用事件不在普通输出展示；可通过 --verbose 查看 NDJSON 细节。
+		return ""
+	case "api_ok":
 		return ""
 	case "api_retry":
 		return ""
@@ -303,19 +312,19 @@ func renderWorkerTraceLine(item client.JobTraceItem) string {
 			intPayload(item.Payload, "next_attempt"),
 			shortText(stringPayload(item.Payload, "error"), 100))
 	case "job_succeeded":
-		return fmt.Sprintf("执行完成（%s）", durationLabel(item.Payload, "duration_ms"))
+		return fmt.Sprintf("执行完成%s", tailDuration(item.Payload, "duration_ms", colorizeLabel))
 	case "job_failed":
 		return fmt.Sprintf("执行失败：%s", shortText(stringPayload(item.Payload, "error"), 120))
 	case "generation_ok":
-		return fmt.Sprintf("生成阶段完成（%s）", durationLabel(item.Payload, "timing_ms"))
+		return fmt.Sprintf("生成阶段完成%s", tailDuration(item.Payload, "timing_ms", colorizeLabel))
 	}
-	return genericWorkerTraceLine(item)
+	return genericWorkerTraceLine(item, colorizeLabel)
 }
 
-func genericWorkerTraceLine(item client.JobTraceItem) string {
+func genericWorkerTraceLine(item client.JobTraceItem, colorizeLabel bool) string {
 	step := stringPayload(item.Payload, "step")
 	errText := stringPayload(item.Payload, "error")
-	label := sectionLabel(item.Payload)
+	label := sectionLabel(item.Payload, colorizeLabel)
 	switch {
 	case strings.HasSuffix(item.Event, "_start") && step != "":
 		return ""
@@ -326,7 +335,7 @@ func genericWorkerTraceLine(item client.JobTraceItem) string {
 	case strings.HasSuffix(item.Event, "_repair_ok"):
 		return fmt.Sprintf("%s修复完成", label)
 	case strings.HasSuffix(item.Event, "_ok") && step != "":
-		return fmt.Sprintf("%s完成（%s）", label, durationLabel(item.Payload, "duration_ms"))
+		return fmt.Sprintf("%s完成%s", label, tailDuration(item.Payload, "duration_ms", colorizeLabel))
 	case strings.HasSuffix(item.Event, "_failed"):
 		if errText != "" {
 			return fmt.Sprintf("%s失败：%s", eventLabel(item.Event), shortText(errText, 120))
@@ -410,15 +419,16 @@ func eventLabel(name string) string {
 	return clean
 }
 
-func sectionLabel(payload map[string]any) string {
+func sectionLabel(payload map[string]any, colorizeLabel bool) string {
+	step := stringPayload(payload, "step")
 	if label := stringPayload(payload, "label"); strings.TrimSpace(label) != "" {
-		return strings.TrimSpace(label)
+		return formatBaseLabelWithStep(strings.TrimSpace(label), step, colorizeLabel)
 	}
 	if label := stringPayload(payload, "display"); strings.TrimSpace(label) != "" {
-		return strings.TrimSpace(label)
+		return formatBaseLabelWithStep(strings.TrimSpace(label), step, colorizeLabel)
 	}
-	step := stringPayload(payload, "step")
 	if step != "" {
+		// 只有规则中定义的 display_labels 才高亮；无 label 时不着色。
 		return stepLabel(step)
 	}
 	section := stringPayload(payload, "section")
@@ -426,6 +436,48 @@ func sectionLabel(payload map[string]any) string {
 		return "步骤"
 	}
 	return stepLabel(section)
+}
+
+func formatBaseLabelWithStep(baseLabel, step string, colorizeLabel bool) string {
+	base := colorLabel(baseLabel, colorizeLabel)
+	if step == "" {
+		return base
+	}
+	if strings.HasPrefix(step, "translate_") {
+		return base + "翻译"
+	}
+	if round, ok := judgeRoundOfStep(step); ok {
+		return fmt.Sprintf("%s一致性修复（第%d轮）", base, round)
+	}
+	if strings.HasSuffix(step, "_whole_repair") {
+		return base + "整段修复"
+	}
+	return base
+}
+
+func judgeRoundOfStep(step string) (int, bool) {
+	parts := strings.Split(step, "_")
+	if len(parts) != 5 {
+		return 0, false
+	}
+	if parts[1] != "judge" || parts[2] != "repair" || parts[3] != "round" {
+		return 0, false
+	}
+	round, err := strconv.Atoi(parts[4])
+	if err != nil || round <= 0 {
+		return 0, false
+	}
+	return round, true
+}
+
+func colorLabel(label string, enabled bool) string {
+	if !enabled {
+		return label
+	}
+	if strings.TrimSpace(label) == "" {
+		return label
+	}
+	return "\x1b[92m" + label + "\x1b[0m"
 }
 
 func intPayload(payload map[string]any, key string) int {
@@ -577,6 +629,17 @@ func durationLabel(payload map[string]any, key string) string {
 	return fmt.Sprintf("%dms", ms)
 }
 
+func tailDuration(payload map[string]any, key string, colorize bool) string {
+	d := durationLabel(payload, key)
+	if d == "-" || strings.TrimSpace(d) == "" {
+		return ""
+	}
+	if colorize {
+		return " " + "\x1b[90m" + d + "\x1b[0m"
+	}
+	return " " + d
+}
+
 func shortText(s string, n int) string {
 	if n <= 0 || len(s) <= n {
 		return s
@@ -599,4 +662,11 @@ func humanDurationShort(d time.Duration) string {
 		return fmt.Sprintf("%dm%ds", m, s)
 	}
 	return fmt.Sprintf("%ds", s)
+}
+
+func mustAbsPath(p string) string {
+	if abs, err := filepath.Abs(p); err == nil {
+		return abs
+	}
+	return p
 }

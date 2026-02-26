@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +16,8 @@ type Logger struct {
 	file    *os.File
 	mu      sync.Mutex
 }
+
+var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
 func NewLogger(verbose bool, logFile string) (*Logger, error) {
 	l := &Logger{verbose: verbose}
@@ -51,7 +54,7 @@ func (l *Logger) writeLine(line string) {
 	defer l.mu.Unlock()
 	fmt.Println(line)
 	if l.file != nil {
-		_, _ = l.file.WriteString(line + "\n")
+		_, _ = l.file.WriteString(ansiEscape.ReplaceAllString(line, "") + "\n")
 	}
 }
 
