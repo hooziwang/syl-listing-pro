@@ -235,6 +235,9 @@ func renderWorkerTraceLine(item client.JobTraceItem) string {
 	}
 	switch item.Event {
 	case "generate_queued":
+		if strings.TrimSpace(item.JobID) != "" {
+			return fmt.Sprintf("任务已入队（job_id=%s）", item.JobID)
+		}
 		return "任务已入队"
 	case "job_started":
 		attempt := intPayload(item.Payload, "queue_attempt")
@@ -256,11 +259,15 @@ func renderWorkerTraceLine(item client.JobTraceItem) string {
 	case "validate_fail":
 		return fmt.Sprintf("%s校验失败：%s", sectionLabel(item.Payload), firstError(item.Payload))
 	case "section_repair_needed":
-		return fmt.Sprintf("%s规则校验失败：%s", sectionLabel(item.Payload), firstError(item.Payload))
-	case "section_item_repair_start":
-		return fmt.Sprintf("%s开始逐条修复（第%d轮）",
+		return fmt.Sprintf("%s规则校验失败（%s）：%s",
 			sectionLabel(item.Payload),
-			intPayload(item.Payload, "round"))
+			errorCountLabel(item.Payload),
+			errorPreview(item.Payload, 0))
+	case "section_item_repair_start":
+		return fmt.Sprintf("%s开始逐条修复（第%d轮，目标=%s）",
+			sectionLabel(item.Payload),
+			intPayload(item.Payload, "round"),
+			targetsLabel(item.Payload))
 	case "section_item_repair_ok":
 		return fmt.Sprintf("%s逐条修复完成", sectionLabel(item.Payload))
 	case "section_item_repair_validate_fail":
@@ -276,26 +283,12 @@ func renderWorkerTraceLine(item client.JobTraceItem) string {
 	case "translate_ok":
 		return fmt.Sprintf("%s完成（%s）", stepLabel(stringPayload(item.Payload, "step")), durationLabel(item.Payload, "duration_ms"))
 	case "api_request":
-		provider := stringPayload(item.Payload, "provider")
-		step := stringPayload(item.Payload, "step")
-		attempt := intPayload(item.Payload, "attempt")
-		if provider != "" && step != "" && attempt > 0 {
-			return fmt.Sprintf("调用 %s：%s（第%d次）", provider, step, attempt)
-		}
+		// 底层 LLM 调用事件不在普通输出展示；可通过 --verbose 查看 NDJSON 细节。
 		return ""
 	case "api_retry":
-		return fmt.Sprintf("调用重试：%s %s（第%d次，等待 %s）：%s",
-			stringPayload(item.Payload, "provider"),
-			stringPayload(item.Payload, "step"),
-			intPayload(item.Payload, "attempt"),
-			durationLabel(item.Payload, "wait_ms"),
-			shortText(stringPayload(item.Payload, "error"), 80))
+		return ""
 	case "api_failed":
-		return fmt.Sprintf("调用失败：%s %s（status=%d）：%s",
-			stringPayload(item.Payload, "provider"),
-			stringPayload(item.Payload, "step"),
-			intPayload(item.Payload, "status_code"),
-			shortText(stringPayload(item.Payload, "error_body"), 80))
+		return ""
 	case "job_retry_scheduled":
 		return fmt.Sprintf("任务重试计划：第 %d/%d 次失败，准备第 %d 次（等待由队列退避控制）：%s",
 			intPayload(item.Payload, "attempt"),
@@ -413,6 +406,99 @@ func firstError(payload map[string]any) string {
 		return shortText(arr[0], 140)
 	}
 	return shortText(fmt.Sprintf("%v", v), 140)
+}
+
+func allErrors(payload map[string]any) []string {
+	v, ok := payload["errors"]
+	if !ok || v == nil {
+		return nil
+	}
+	if arr, ok := v.([]any); ok {
+		out := make([]string, 0, len(arr))
+		for _, item := range arr {
+			s := strings.TrimSpace(fmt.Sprintf("%v", item))
+			if s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	if arr, ok := v.([]string); ok {
+		out := make([]string, 0, len(arr))
+		for _, item := range arr {
+			s := strings.TrimSpace(item)
+			if s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	s := strings.TrimSpace(fmt.Sprintf("%v", v))
+	if s == "" {
+		return nil
+	}
+	return []string{s}
+}
+
+func errorCountLabel(payload map[string]any) string {
+	errs := allErrors(payload)
+	if len(errs) == 0 {
+		return "1条"
+	}
+	return fmt.Sprintf("%d条", len(errs))
+}
+
+func errorPreview(payload map[string]any, max int) string {
+	errs := allErrors(payload)
+	if len(errs) == 0 {
+		return firstError(payload)
+	}
+	// max<=0 表示完整输出全部错误，不做省略。
+	if max <= 0 || len(errs) <= max {
+		return strings.Join(errs, "；")
+	}
+	head := strings.Join(errs[:max], "；")
+	return fmt.Sprintf("%s；...（其余%d条）", head, len(errs)-max)
+}
+
+func targetsLabel(payload map[string]any) string {
+	v, ok := payload["targets"]
+	if !ok || v == nil {
+		return "-"
+	}
+	if arr, ok := v.([]any); ok {
+		out := make([]string, 0, len(arr))
+		for _, item := range arr {
+			switch n := item.(type) {
+			case float64:
+				out = append(out, fmt.Sprintf("%d", int(n)))
+			case int:
+				out = append(out, fmt.Sprintf("%d", n))
+			case int64:
+				out = append(out, fmt.Sprintf("%d", n))
+			default:
+				s := strings.TrimSpace(fmt.Sprintf("%v", item))
+				if s != "" {
+					out = append(out, s)
+				}
+			}
+		}
+		if len(out) == 0 {
+			return "-"
+		}
+		return strings.Join(out, ",")
+	}
+	if arr, ok := v.([]string); ok {
+		if len(arr) == 0 {
+			return "-"
+		}
+		return strings.Join(arr, ",")
+	}
+	s := strings.TrimSpace(fmt.Sprintf("%v", v))
+	if s == "" {
+		return "-"
+	}
+	return s
 }
 
 func durationLabel(payload map[string]any, key string) string {
