@@ -36,8 +36,6 @@ type API struct {
 }
 
 const (
-	exchangeMaxAttempts   = 5
-	exchangeBackoffBase   = 300 * time.Millisecond
 	connectTimeout        = 10 * time.Second
 	tlsHandshakeTimeout   = 10 * time.Second
 	responseHeaderTimeout = 30 * time.Second
@@ -46,7 +44,23 @@ const (
 	idleConnTimeout       = 90 * time.Second
 	maxIdleConns          = 100
 	maxIdleConnsPerHost   = 10
+	retryBackoffBase      = 300 * time.Millisecond
+	retryBackoffMax       = 4 * time.Second
+	defaultMaxAttempts    = 3
+	exchangeMaxAttempts   = 5
+	generateMaxAttempts   = 3
+	jobPollMaxAttempts    = 5
 )
+
+type httpStatusError struct {
+	statusCode int
+	status     string
+	body       string
+}
+
+func (e *httpStatusError) Error() string {
+	return fmt.Sprintf("%s: %s", e.status, strings.TrimSpace(e.body))
+}
 
 func New(baseURL string) *API {
 	dialer := &net.Dialer{
@@ -109,40 +123,20 @@ func traceBody(b []byte) string {
 }
 
 func (a *API) Exchange(ctx context.Context, sylKey string) (ExchangeResp, error) {
-	url := a.baseURL + "/v1/auth/exchange"
-	for attempt := 1; attempt <= exchangeMaxAttempts; attempt++ {
+	var out ExchangeResp
+	err := a.doJSONWithRetry(ctx, exchangeMaxAttempts, func() (*http.Request, error) {
+		url := a.baseURL + "/v1/auth/exchange"
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 		if err != nil {
-			return ExchangeResp{}, err
+			return nil, err
 		}
 		req.Header.Set("Authorization", "Bearer "+sylKey)
-
-		var out ExchangeResp
-		if err := a.doJSON(req, &out); err != nil {
-			if !isRetryableExchangeErr(err) || attempt == exchangeMaxAttempts {
-				return ExchangeResp{}, err
-			}
-			backoff := exchangeBackoff(attempt)
-			a.emitTrace(TraceEvent{
-				Stage:      "retry",
-				Method:     http.MethodPost,
-				URL:        url,
-				DurationMs: backoff.Milliseconds(),
-				Error:      err.Error(),
-				Request:    fmt.Sprintf(`{"attempt":%d,"next_attempt":%d}`, attempt, attempt+1),
-			})
-			timer := time.NewTimer(backoff)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return ExchangeResp{}, ctx.Err()
-			case <-timer.C:
-			}
-			continue
-		}
-		return out, nil
+		return req, nil
+	}, &out)
+	if err != nil {
+		return ExchangeResp{}, err
 	}
-	return ExchangeResp{}, fmt.Errorf("auth exchange failed")
+	return out, nil
 }
 
 func (a *API) ResolveRules(ctx context.Context, token, current string) (RulesResolveResp, error) {
@@ -163,7 +157,9 @@ func (a *API) ResolveRules(ctx context.Context, token, current string) (RulesRes
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	var out RulesResolveResp
-	if err := a.doJSON(req, &out); err != nil {
+	if err := a.doJSONWithRetry(ctx, defaultMaxAttempts, func() (*http.Request, error) {
+		return cloneRequest(req)
+	}, &out); err != nil {
 		return RulesResolveResp{}, err
 	}
 	return out, nil
@@ -178,7 +174,9 @@ func (a *API) Generate(ctx context.Context, token string, in GenerateReq) (Gener
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	var out GenerateResp
-	if err := a.doJSON(req, &out); err != nil {
+	if err := a.doJSONWithRetry(ctx, generateMaxAttempts, func() (*http.Request, error) {
+		return cloneRequest(req)
+	}, &out); err != nil {
 		return GenerateResp{}, err
 	}
 	return out, nil
@@ -191,7 +189,9 @@ func (a *API) Job(ctx context.Context, token, jobID string) (JobStatusResp, erro
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	var out JobStatusResp
-	if err := a.doJSON(req, &out); err != nil {
+	if err := a.doJSONWithRetry(ctx, jobPollMaxAttempts, func() (*http.Request, error) {
+		return cloneRequest(req)
+	}, &out); err != nil {
 		return JobStatusResp{}, err
 	}
 	return out, nil
@@ -204,7 +204,9 @@ func (a *API) Result(ctx context.Context, token, jobID string) (ResultResp, erro
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	var out ResultResp
-	if err := a.doJSON(req, &out); err != nil {
+	if err := a.doJSONWithRetry(ctx, jobPollMaxAttempts, func() (*http.Request, error) {
+		return cloneRequest(req)
+	}, &out); err != nil {
 		return ResultResp{}, err
 	}
 	return out, nil
@@ -216,6 +218,48 @@ func (a *API) Download(ctx context.Context, token, rawURL string) ([]byte, strin
 		return nil, "", err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
+	return a.downloadWithRetry(ctx, defaultMaxAttempts, func() (*http.Request, error) {
+		return cloneRequest(req)
+	})
+}
+
+func (a *API) downloadWithRetry(ctx context.Context, maxAttempts int, buildReq func() (*http.Request, error)) ([]byte, string, error) {
+	if maxAttempts <= 0 {
+		maxAttempts = 1
+	}
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		req, err := buildReq()
+		if err != nil {
+			return nil, "", err
+		}
+		body, sha, err := a.downloadOnce(req)
+		if err == nil {
+			return body, sha, nil
+		}
+		if !isRetryableRequestErr(err) || attempt >= maxAttempts {
+			return nil, "", err
+		}
+		backoff := retryBackoff(attempt)
+		a.emitTrace(TraceEvent{
+			Stage:      "retry",
+			Method:     req.Method,
+			URL:        req.URL.String(),
+			DurationMs: backoff.Milliseconds(),
+			Error:      err.Error(),
+			Request:    fmt.Sprintf(`{"attempt":%d,"next_attempt":%d}`, attempt, attempt+1),
+		})
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, "", ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return nil, "", fmt.Errorf("download retry exhausted")
+}
+
+func (a *API) downloadOnce(req *http.Request) ([]byte, string, error) {
 	reqBody := readReqBody(req)
 	a.emitTrace(TraceEvent{
 		Stage:   "request",
@@ -248,13 +292,53 @@ func (a *API) Download(ctx context.Context, token, rawURL string) ([]byte, strin
 		Response:   traceBody(body),
 	})
 	if resp.StatusCode/100 != 2 {
-		return nil, "", fmt.Errorf("下载失败: %s %s", resp.Status, strings.TrimSpace(string(body)))
+		return nil, "", &httpStatusError{
+			statusCode: resp.StatusCode,
+			status:     resp.Status,
+			body:       string(body),
+		}
 	}
 	h := sha256.Sum256(body)
 	return body, hex.EncodeToString(h[:]), nil
 }
 
-func (a *API) doJSON(req *http.Request, out any) error {
+func (a *API) doJSONWithRetry(ctx context.Context, maxAttempts int, buildReq func() (*http.Request, error), out any) error {
+	if maxAttempts <= 0 {
+		maxAttempts = 1
+	}
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		req, err := buildReq()
+		if err != nil {
+			return err
+		}
+		err = a.doJSONOnce(req, out)
+		if err == nil {
+			return nil
+		}
+		if !isRetryableRequestErr(err) || attempt >= maxAttempts {
+			return err
+		}
+		backoff := retryBackoff(attempt)
+		a.emitTrace(TraceEvent{
+			Stage:      "retry",
+			Method:     req.Method,
+			URL:        req.URL.String(),
+			DurationMs: backoff.Milliseconds(),
+			Error:      err.Error(),
+			Request:    fmt.Sprintf(`{"attempt":%d,"next_attempt":%d}`, attempt, attempt+1),
+		})
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return fmt.Errorf("request retry exhausted")
+}
+
+func (a *API) doJSONOnce(req *http.Request, out any) error {
 	reqBody := readReqBody(req)
 	a.emitTrace(TraceEvent{
 		Stage:   "request",
@@ -287,7 +371,11 @@ func (a *API) doJSON(req *http.Request, out any) error {
 		Response:   traceBody(body),
 	})
 	if resp.StatusCode/100 != 2 {
-		return fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(body)))
+		return &httpStatusError{
+			statusCode: resp.StatusCode,
+			status:     resp.Status,
+			body:       string(body),
+		}
 	}
 	if out == nil {
 		return nil
@@ -298,20 +386,29 @@ func (a *API) doJSON(req *http.Request, out any) error {
 	return nil
 }
 
-func exchangeBackoff(attempt int) time.Duration {
+func retryBackoff(attempt int) time.Duration {
 	if attempt <= 0 {
-		return exchangeBackoffBase
+		return retryBackoffBase
 	}
-	d := exchangeBackoffBase * time.Duration(1<<(attempt-1))
-	if d > 4*time.Second {
-		return 4 * time.Second
+	d := retryBackoffBase * time.Duration(1<<(attempt-1))
+	if d > retryBackoffMax {
+		return retryBackoffMax
 	}
 	return d
 }
 
-func isRetryableExchangeErr(err error) bool {
+func isRetryableRequestErr(err error) bool {
 	if err == nil {
 		return false
+	}
+	var statusErr *httpStatusError
+	if errors.As(err, &statusErr) {
+		switch statusErr.statusCode {
+		case 408, 425, 429, 500, 502, 503, 504:
+			return true
+		default:
+			return false
+		}
 	}
 	if errors.Is(err, io.EOF) {
 		return true
@@ -329,6 +426,9 @@ func isRetryableExchangeErr(err error) bool {
 		"broken pipe",
 		"unexpected eof",
 		"eof",
+		"service unavailable",
+		"bad gateway",
+		"gateway timeout",
 	}
 	for _, key := range retryable {
 		if strings.Contains(msg, key) {
@@ -336,4 +436,20 @@ func isRetryableExchangeErr(err error) bool {
 		}
 	}
 	return false
+}
+
+func cloneRequest(req *http.Request) (*http.Request, error) {
+	if req == nil {
+		return nil, fmt.Errorf("nil request")
+	}
+	cloned := req.Clone(req.Context())
+	if req.GetBody == nil {
+		return cloned, nil
+	}
+	body, err := req.GetBody()
+	if err != nil {
+		return nil, err
+	}
+	cloned.Body = body
+	return cloned, nil
 }
