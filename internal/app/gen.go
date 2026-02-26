@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -352,31 +353,63 @@ func tracePrefix(tenantID string, elapsedMs int64) string {
 func stepLabel(step string) string {
 	switch step {
 	case "title":
-		return "英文标题生成"
+		return "标题生成"
 	case "bullets":
-		return "英文五点描述生成"
+		return "五点描述生成"
 	case "description":
-		return "英文产品描述生成"
+		return "产品描述生成"
 	case "search_terms":
-		return "英文搜索词生成"
+		return "搜索词生成"
 	case "translate_category":
-		return "中文分类翻译"
+		return "分类翻译"
 	case "translate_keywords":
-		return "中文关键词翻译"
+		return "关键词翻译"
 	case "translate_title":
-		return "中文标题翻译"
+		return "标题翻译"
 	case "translate_bullets":
-		return "中文五点描述翻译"
+		return "五点描述翻译"
 	case "translate_description":
-		return "中文产品描述翻译"
+		return "产品描述翻译"
 	case "translate_search_terms":
-		return "中文搜索词翻译"
+		return "搜索词翻译"
 	default:
+		if label, ok := judgeRoundStepLabel(step); ok {
+			return label
+		}
 		if step == "" {
 			return "任务步骤"
 		}
 		return step
 	}
+}
+
+func judgeRoundStepLabel(step string) (string, bool) {
+	parts := strings.Split(step, "_")
+	// 期望格式: <section>_judge_repair_round_<n>
+	if len(parts) != 5 {
+		return "", false
+	}
+	if parts[1] != "judge" || parts[2] != "repair" || parts[3] != "round" {
+		return "", false
+	}
+	round, err := strconv.Atoi(parts[4])
+	if err != nil || round <= 0 {
+		return "", false
+	}
+	var sectionName string
+	switch parts[0] {
+	case "title":
+		sectionName = "标题"
+	case "bullets":
+		sectionName = "五点描述"
+	case "description":
+		sectionName = "产品描述"
+	case "search_terms":
+		sectionName = "搜索词"
+	default:
+		return "", false
+	}
+	return fmt.Sprintf("%s一致性修复（第%d轮）", sectionName, round), true
 }
 
 func sectionLabel(payload map[string]any) string {
