@@ -126,6 +126,24 @@ func TestLabelsAndSteps(t *testing.T) {
 	if got := tracePrefix("demo", 3_661_000); got != "demo:01:01:01" {
 		t.Fatalf("got=%q", got)
 	}
+	if got := taskDisplayLabel(1, 1, "/tmp/pinpai.md", 1); got != "" {
+		t.Fatalf("got=%q", got)
+	}
+	if got := taskDisplayLabel(2, 1, "/tmp/pinpai.md", 1); got != "pinpai.md" {
+		t.Fatalf("got=%q", got)
+	}
+	if got := taskDisplayLabel(1, 3, "/tmp/pinpai.md", 2); got != "#2" {
+		t.Fatalf("got=%q", got)
+	}
+	if got := taskDisplayLabel(2, 3, "/tmp/pinpai.md", 2); got != "pinpai.md#2" {
+		t.Fatalf("got=%q", got)
+	}
+	if got := taskPrefix("syl", 21_000, "pinpai.md#1"); got != "syl:00:21 [pinpai.md#1]" {
+		t.Fatalf("got=%q", got)
+	}
+	if got := taskPrefix("syl", 21_000, ""); got != "syl:00:21" {
+		t.Fatalf("got=%q", got)
+	}
 
 	if got := stepLabel(""); got != "任务步骤" {
 		t.Fatalf("got=%q", got)
