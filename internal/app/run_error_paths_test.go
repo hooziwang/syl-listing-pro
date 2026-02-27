@@ -15,6 +15,7 @@ import (
 )
 
 func TestRunGen_FirstRunRuleSyncFailureBranches(t *testing.T) {
+	stubDocxConverter(t)
 	home := t.TempDir()
 	cacheHome := t.TempDir()
 	t.Setenv("HOME", home)
@@ -114,6 +115,7 @@ func TestRunGen_FirstRunRuleSyncFailureBranches(t *testing.T) {
 }
 
 func TestRunGen_RuntimeFailureBranches(t *testing.T) {
+	stubDocxConverter(t)
 	home := t.TempDir()
 	cacheHome := t.TempDir()
 	t.Setenv("HOME", home)

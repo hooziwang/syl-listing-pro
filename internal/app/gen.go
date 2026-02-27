@@ -245,9 +245,26 @@ func RunGen(ctx context.Context, opts GenOptions) error {
 						log.Info(fmt.Sprintf("%s 生成失败：写 CN 失败: %v", tracePrefix(tenantForLog, elapsedForLog), err))
 						break
 					}
-					success++
 					log.Info(fmt.Sprintf("%s EN 已写入：%s", tracePrefix(tenantForLog, elapsedForLog), mustAbsPath(enPath)))
 					log.Info(fmt.Sprintf("%s CN 已写入：%s", tracePrefix(tenantForLog, elapsedForLog), mustAbsPath(cnPath)))
+
+					enDocxTargetPath := strings.TrimSuffix(enPath, filepath.Ext(enPath)) + ".docx"
+					enDocxPath, err := convertMarkdownToDocxFunc(ctx, enPath, enDocxTargetPath, resData.Meta.HighlightWordsEN)
+					if err != nil {
+						failed++
+						log.Info(fmt.Sprintf("%s 生成失败：EN Word 转换失败: %v", tracePrefix(tenantForLog, elapsedForLog), err))
+						break
+					}
+					cnDocxTargetPath := strings.TrimSuffix(cnPath, filepath.Ext(cnPath)) + ".docx"
+					cnDocxPath, err := convertMarkdownToDocxFunc(ctx, cnPath, cnDocxTargetPath, resData.Meta.HighlightWordsCN)
+					if err != nil {
+						failed++
+						log.Info(fmt.Sprintf("%s 生成失败：CN Word 转换失败: %v", tracePrefix(tenantForLog, elapsedForLog), err))
+						break
+					}
+					success++
+					log.Info(fmt.Sprintf("%s EN Word 已写入：%s", tracePrefix(tenantForLog, elapsedForLog), mustAbsPath(enDocxPath)))
+					log.Info(fmt.Sprintf("%s CN Word 已写入：%s", tracePrefix(tenantForLog, elapsedForLog), mustAbsPath(cnDocxPath)))
 					break
 				}
 				if stResp.Status == "failed" {

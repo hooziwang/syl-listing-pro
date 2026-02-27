@@ -176,6 +176,7 @@ func captureStdoutRun(t *testing.T, fn func() error) (string, error) {
 }
 
 func TestRunGen_SuccessWithCachedRules(t *testing.T) {
+	stubDocxConverter(t)
 	home := t.TempDir()
 	cacheHome := t.TempDir()
 	t.Setenv("HOME", home)
@@ -297,7 +298,95 @@ func TestRunUpdateRules_UpToDate(t *testing.T) {
 	}
 }
 
+func TestRunGen_PassesHighlightWordsToDocxConverter(t *testing.T) {
+	home := t.TempDir()
+	cacheHome := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", cacheHome)
+	writeKeyEnvForTest(t, home)
+
+	cacheDir, err := rules.DefaultCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	archivePath, err := rules.SaveArchive(cacheDir, "demo", "v1", makeRulesArchiveBytes(t, "#MARK"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rules.SaveState(cacheDir, "demo", rules.CacheState{RulesVersion: "v1", ManifestSHA: "sha", ArchivePath: archivePath}); err != nil {
+		t.Fatal(err)
+	}
+
+	type call struct {
+		mdPath string
+		words  []string
+	}
+	var calls []call
+	oldConvert := convertMarkdownToDocxFunc
+	convertMarkdownToDocxFunc = func(_ context.Context, markdownPath string, outputPath string, highlightWords []string) (string, error) {
+		calls = append(calls, call{mdPath: markdownPath, words: append([]string(nil), highlightWords...)})
+		return outputPath, nil
+	}
+	defer func() { convertMarkdownToDocxFunc = oldConvert }()
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/auth/exchange":
+			_, _ = io.WriteString(w, `{"access_token":"at","tenant_id":"demo","expires_in":3600}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/rules/resolve":
+			_, _ = io.WriteString(w, `{"up_to_date":true,"rules_version":"v1"}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/generate":
+			_, _ = io.WriteString(w, `{"job_id":"job_meta","status":"queued"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job_meta/trace":
+			_, _ = io.WriteString(w, `{"ok":true,"job_id":"job_meta","job_status":"running","tenant_id":"demo","trace_count":0,"limit":300,"offset":0,"next_offset":0,"has_more":false,"items":[]}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job_meta":
+			_, _ = io.WriteString(w, `{"job_id":"job_meta","status":"succeeded"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job_meta/result":
+			_, _ = io.WriteString(w, `{"en_markdown":"# EN","cn_markdown":"# CN","meta":{"highlight_words_en":["A","B"],"highlight_words_cn":["甲","乙"]}}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+
+	oldBase := workerBaseURL
+	oldPoll := pollIntervalMs
+	workerBaseURL = ts.URL
+	pollIntervalMs = 1
+	defer func() {
+		workerBaseURL = oldBase
+		pollIntervalMs = oldPoll
+	}()
+
+	inputPath := filepath.Join(t.TempDir(), "req.md")
+	if err := os.WriteFile(inputPath, []byte("#MARK\ninput content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := RunGen(context.Background(), GenOptions{OutputDir: t.TempDir(), Inputs: []string{inputPath}}); err != nil {
+		t.Fatalf("RunGen error: %v", err)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("convert calls=%d want=2", len(calls))
+	}
+	if strings.HasSuffix(calls[0].mdPath, "_en.md") {
+		if got := strings.Join(calls[0].words, ","); got != "A,B" {
+			t.Fatalf("en words=%s", got)
+		}
+		if got := strings.Join(calls[1].words, ","); got != "甲,乙" {
+			t.Fatalf("cn words=%s", got)
+		}
+	} else {
+		if got := strings.Join(calls[0].words, ","); got != "甲,乙" {
+			t.Fatalf("cn words=%s", got)
+		}
+		if got := strings.Join(calls[1].words, ","); got != "A,B" {
+			t.Fatalf("en words=%s", got)
+		}
+	}
+}
+
 func TestRunGen_GenerateAndJobFailurePaths(t *testing.T) {
+	stubDocxConverter(t)
 	home := t.TempDir()
 	cacheHome := t.TempDir()
 	t.Setenv("HOME", home)
@@ -385,6 +474,7 @@ func TestRunGen_GenerateAndJobFailurePaths(t *testing.T) {
 }
 
 func TestRunGen_Timeout(t *testing.T) {
+	stubDocxConverter(t)
 	home := t.TempDir()
 	cacheHome := t.TempDir()
 	t.Setenv("HOME", home)
@@ -598,6 +688,7 @@ func TestRunUpdateRules_DownloadAndVerifySuccess(t *testing.T) {
 }
 
 func TestRunGen_FirstRunDownloadRulesThenGenerateFail(t *testing.T) {
+	stubDocxConverter(t)
 	home := t.TempDir()
 	cacheHome := t.TempDir()
 	t.Setenv("HOME", home)
