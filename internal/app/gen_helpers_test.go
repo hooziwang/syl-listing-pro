@@ -72,6 +72,15 @@ func TestRenderWorkerTraceLine(t *testing.T) {
 		t.Fatalf("got=%q", got)
 	}
 
+	it = client.JobTraceItem{Event: "job_failed", Payload: map[string]any{"error": "boom"}}
+	if got = renderWorkerTraceLine(it, false); got != "执行失败：boom" {
+		t.Fatalf("got=%q", got)
+	}
+	it = client.JobTraceItem{Event: "api_request", Payload: map[string]any{"step": "x"}}
+	if got = renderWorkerTraceLine(it, false); got != "" {
+		t.Fatalf("got=%q", got)
+	}
+
 	it = client.JobTraceItem{Event: "x", Payload: map[string]any{"message": "  hello  "}}
 	if got = renderWorkerTraceLine(it, false); got != "hello" {
 		t.Fatalf("got=%q", got)
@@ -215,6 +224,12 @@ func TestPayloadAndErrorsHelpers(t *testing.T) {
 	if got := firstError(map[string]any{"errors": []any{"e1"}}); got != "e1" {
 		t.Fatalf("got=%q", got)
 	}
+	if got := firstError(map[string]any{"errors": []string{"e2"}}); got != "e2" {
+		t.Fatalf("got=%q", got)
+	}
+	if got := firstError(map[string]any{"errors": 123}); got != "123" {
+		t.Fatalf("got=%q", got)
+	}
 
 	errPayload := map[string]any{"errors": []any{"e1", " e2 "}}
 	errList := allErrors(errPayload)
@@ -251,6 +266,9 @@ func TestPayloadAndErrorsHelpers(t *testing.T) {
 		t.Fatalf("got=%q", got)
 	}
 	if got := targetsLabel(map[string]any{"targets": []string{"a", "b"}}); got != "a,b" {
+		t.Fatalf("got=%q", got)
+	}
+	if got := targetsLabel(map[string]any{"targets": 1}); got != "1" {
 		t.Fatalf("got=%q", got)
 	}
 	if got := targetsLabel(map[string]any{}); got != "-" {
@@ -307,6 +325,7 @@ func TestDurationAndTextHelpers(t *testing.T) {
 	if !filepath.IsAbs(abs) {
 		t.Fatalf("want abs path, got %q", abs)
 	}
+
 	if got := mustAbsPath(""); got == "" {
 		t.Fatalf("expected non-empty for empty input")
 	}

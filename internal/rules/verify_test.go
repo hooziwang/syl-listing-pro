@@ -188,3 +188,66 @@ func TestVerifyArchiveSignatureWithBundledKeyOpenSSL_FieldValidation(t *testing.
 		t.Fatalf("unexpected err: %v", err)
 	}
 }
+
+func TestParseRSAPublicKey_PKCS1AndInvalidTypes(t *testing.T) {
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkcs1DER := x509.MarshalPKCS1PublicKey(&priv.PublicKey)
+	pkcs1PEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PUBLIC KEY", Bytes: pkcs1DER})
+	if _, err := parseRSAPublicKey(pkcs1PEM); err != nil {
+		t.Fatalf("parse pkcs1 rsa public key error: %v", err)
+	}
+
+	if _, err := parseRSAPublicKey([]byte("not a pem")); err == nil || !strings.Contains(err.Error(), "无效 PEM 公钥") {
+		t.Fatalf("unexpected err for bad pem: %v", err)
+	}
+	unknownPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PUBLIC KEY", Bytes: []byte("abc")})
+	if _, err := parseRSAPublicKey(unknownPEM); err == nil || !strings.Contains(err.Error(), "不支持的公钥类型") {
+		t.Fatalf("unexpected err for unsupported key type: %v", err)
+	}
+}
+
+func TestVerifyWithOpenSSL_ReadAndSignatureErrors(t *testing.T) {
+	work := t.TempDir()
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := mustRSAPublicKeyPEM(t, &priv.PublicKey)
+	payload := []byte("payload")
+	sig := mustSignSHA256(t, priv, payload)
+
+	pubPath := filepath.Join(work, "pub.pem")
+	payloadPath := filepath.Join(work, "payload.bin")
+	sigPath := filepath.Join(work, "payload.sig")
+	if err := os.WriteFile(pubPath, pub, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(payloadPath, payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sigPath, sig, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyWithOpenSSL(pubPath, payloadPath, sigPath); err != nil {
+		t.Fatalf("verifyWithOpenSSL valid sig error: %v", err)
+	}
+
+	badSig := append([]byte(nil), sig...)
+	badSig[len(badSig)-1] ^= 0x01
+	if err := os.WriteFile(sigPath, badSig, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyWithOpenSSL(pubPath, payloadPath, sigPath); err == nil {
+		t.Fatal("expected signature verify error")
+	}
+
+	if err := verifyWithOpenSSL(pubPath, filepath.Join(work, "missing.bin"), sigPath); err == nil || !strings.Contains(err.Error(), "读取待验签文件失败") {
+		t.Fatalf("unexpected missing payload err: %v", err)
+	}
+	if err := verifyWithOpenSSL(pubPath, payloadPath, filepath.Join(work, "missing.sig")); err == nil || !strings.Contains(err.Error(), "读取签名文件失败") {
+		t.Fatalf("unexpected missing sig err: %v", err)
+	}
+}

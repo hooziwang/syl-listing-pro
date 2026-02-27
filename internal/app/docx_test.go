@@ -98,3 +98,72 @@ func TestParseMD2DocOutputPath(t *testing.T) {
 		t.Fatalf("got=%q", got)
 	}
 }
+
+func TestParseMD2DocOutputPath_OutputPathsFallback(t *testing.T) {
+	out := []byte("{\"event\":\"summary\",\"details\":{\"output_paths\":[\"/tmp/fallback.docx\"]}}\n")
+	if got := parseMD2DocOutputPath(out); got != "/tmp/fallback.docx" {
+		t.Fatalf("got=%q", got)
+	}
+}
+
+func TestConvertMarkdownToDocx_RenameFromSummaryPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script test is unix-only")
+	}
+	tmp := t.TempDir()
+	binDir := filepath.Join(tmp, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	reported := filepath.Join(tmp, "raw", "x.docx")
+	script := "#!/bin/sh\n" +
+		"mkdir -p '" + filepath.Dir(reported) + "'\n" +
+		"echo 'docx' > '" + reported + "'\n" +
+		"echo '{\"event\":\"summary\",\"details\":{\"output_path\":\"" + reported + "\"}}'\n"
+	writeExecutable(t, filepath.Join(binDir, "syl-md2doc"), script)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	md := filepath.Join(tmp, "in.md")
+	if err := os.WriteFile(md, []byte("# x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(tmp, "want", "final.docx")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ConvertMarkdownToDocx(context.Background(), md, target, nil)
+	if err != nil {
+		t.Fatalf("ConvertMarkdownToDocx error: %v", err)
+	}
+	if got != target {
+		t.Fatalf("got=%q want=%q", got, target)
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Fatalf("target docx missing: %v", err)
+	}
+	if _, err := os.Stat(reported); !os.IsNotExist(err) {
+		t.Fatalf("reported file should be renamed away, err=%v", err)
+	}
+}
+
+func TestConvertMarkdownToDocx_NoOutputPathAndMissingTarget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script test is unix-only")
+	}
+	tmp := t.TempDir()
+	binDir := filepath.Join(tmp, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\necho '{\"event\":\"summary\",\"details\":{}}'\n"
+	writeExecutable(t, filepath.Join(binDir, "syl-md2doc"), script)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	md := filepath.Join(tmp, "in.md")
+	_ = os.WriteFile(md, []byte("# x\n"), 0o644)
+	_, err := ConvertMarkdownToDocx(context.Background(), md, filepath.Join(tmp, "no", "out.docx"), nil)
+	if err == nil || !strings.Contains(err.Error(), "未返回输出路径") {
+		t.Fatalf("unexpected err: %v", err)
+	}
+}

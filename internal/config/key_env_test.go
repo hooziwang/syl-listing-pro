@@ -99,3 +99,29 @@ func TestLoadSYLListingKey_QuotedAndEmpty(t *testing.T) {
 		t.Fatalf("err=%v, want ErrSYLKeyNotConfigured", err)
 	}
 }
+
+func TestSaveSYLListingKey_AppendWhenNoExistingKey(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	envPath := filepath.Join(home, ".syl-listing-pro", ".env")
+	if err := os.MkdirAll(filepath.Dir(envPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// 最后一行非空且无换行，覆盖 append 分支。
+	orig := "A=1\nB=2"
+	if err := os.WriteFile(envPath, []byte(orig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := SaveSYLListingKey("k123"); err != nil {
+		t.Fatalf("SaveSYLListingKey error: %v", err)
+	}
+	b, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	if !strings.Contains(s, "A=1\nB=2\n\nSYL_LISTING_KEY=k123\n") {
+		t.Fatalf("unexpected env content: %q", s)
+	}
+}

@@ -72,3 +72,31 @@ func TestClearInvalidTenant(t *testing.T) {
 		t.Fatal("expected invalid tenant error")
 	}
 }
+
+func TestStateAndArchiveErrorBranches(t *testing.T) {
+	tenant := "demo"
+	// cacheDir 是文件，触发目录创建失败分支。
+	base := filepath.Join(t.TempDir(), "cache-file")
+	if err := os.WriteFile(base, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveState(base, tenant, CacheState{RulesVersion: "v1"}); err == nil {
+		t.Fatal("expected SaveState mkdir error")
+	}
+	if _, err := SaveArchive(base, tenant, "v1", []byte("abc")); err == nil {
+		t.Fatal("expected SaveArchive mkdir error")
+	}
+
+	// 非法 JSON 触发 LoadState 解析失败分支。
+	cacheDir := t.TempDir()
+	p := filepath.Join(cacheDir, tenant, "current.json")
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte("{bad json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadState(cacheDir, tenant); err == nil {
+		t.Fatal("expected LoadState unmarshal error")
+	}
+}
