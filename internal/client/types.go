@@ -36,6 +36,14 @@ type JobStatusResp struct {
 	UpdatedAt string `json:"updated_at,omitempty"`
 }
 
+type CancelResp struct {
+	OK        bool   `json:"ok"`
+	JobID     string `json:"job_id"`
+	Status    string `json:"status"`
+	Cancelled bool   `json:"cancelled"`
+	Reason    string `json:"reason,omitempty"`
+}
+
 type ResultResp struct {
 	ENMarkdown       string   `json:"en_markdown"`
 	CNMarkdown       string   `json:"cn_markdown"`

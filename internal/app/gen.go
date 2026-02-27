@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -36,6 +37,40 @@ type generateTask struct {
 	file  input.RequirementFile
 	index int
 	label string
+}
+
+type submittedJob struct {
+	jobID string
+	label string
+}
+
+type submittedJobRegistry struct {
+	mu   sync.Mutex
+	jobs map[string]submittedJob
+}
+
+func newSubmittedJobRegistry() *submittedJobRegistry {
+	return &submittedJobRegistry{jobs: make(map[string]submittedJob)}
+}
+
+func (r *submittedJobRegistry) add(jobID, label string) {
+	id := strings.TrimSpace(jobID)
+	if id == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.jobs[id] = submittedJob{jobID: id, label: label}
+}
+
+func (r *submittedJobRegistry) snapshot() []submittedJob {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]submittedJob, 0, len(r.jobs))
+	for _, item := range r.jobs {
+		out = append(out, item)
+	}
+	return out
 }
 
 func RunGen(ctx context.Context, opts GenOptions) error {
@@ -139,6 +174,59 @@ func RunGen(ctx context.Context, opts GenOptions) error {
 	}
 
 	tasks := buildGenerateTasks(files, opts.Num)
+	submitted := newSubmittedJobRegistry()
+	var cancelOnce sync.Once
+	cancelDone := make(chan struct{})
+	cancelSubmittedTasks := func() {
+		cancelOnce.Do(func() {
+			defer close(cancelDone)
+			jobs := submitted.snapshot()
+			if len(jobs) == 0 {
+				return
+			}
+			log.Info(fmt.Sprintf("检测到中断，开始取消已提交任务（%d）", len(jobs)))
+			cancelCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			var okCount atomic.Int64
+			var failCount atomic.Int64
+			var cwg sync.WaitGroup
+			cancelSem := semaphore.NewWeighted(8)
+			for _, item := range jobs {
+				item := item
+				cwg.Add(1)
+				go func() {
+					defer cwg.Done()
+					if err := cancelSem.Acquire(cancelCtx, 1); err != nil {
+						failCount.Add(1)
+						return
+					}
+					defer cancelSem.Release(1)
+					resp, err := api.CancelJob(cancelCtx, ex.AccessToken, item.jobID)
+					if err != nil {
+						failCount.Add(1)
+						log.Info(fmt.Sprintf("%s 取消失败：%v", taskPrefix(ex.TenantID, 0, item.label), err))
+						return
+					}
+					okCount.Add(1)
+					if resp.Cancelled || strings.EqualFold(resp.Status, "cancelled") {
+						log.Info(fmt.Sprintf("%s 已取消（job_id=%s）", taskPrefix(ex.TenantID, 0, item.label), item.jobID))
+						return
+					}
+					log.Info(fmt.Sprintf("%s 已提交取消请求（job_id=%s）", taskPrefix(ex.TenantID, 0, item.label), item.jobID))
+				}()
+			}
+			cwg.Wait()
+			log.Info(fmt.Sprintf("取消完成：成功 %d，失败 %d", okCount.Load(), failCount.Load()))
+		})
+	}
+
+	go func() {
+		<-ctx.Done()
+		if errors.Is(ctx.Err(), context.Canceled) {
+			cancelSubmittedTasks()
+		}
+	}()
+
 	var successCount atomic.Int64
 	var failedCount atomic.Int64
 	var wg sync.WaitGroup
@@ -156,7 +244,9 @@ func RunGen(ctx context.Context, opts GenOptions) error {
 			}
 			defer sem.Release(1)
 
-			if runGenerateTask(ctx, api, ex, log, opts, task) {
+			if runGenerateTask(ctx, api, ex, log, opts, task, func(jobID string) {
+				submitted.add(jobID, task.label)
+			}) {
 				successCount.Add(1)
 				return
 			}
@@ -164,6 +254,15 @@ func RunGen(ctx context.Context, opts GenOptions) error {
 		}()
 	}
 	wg.Wait()
+	if errors.Is(ctx.Err(), context.Canceled) {
+		cancelSubmittedTasks()
+		select {
+		case <-cancelDone:
+		case <-time.After(25 * time.Second):
+			log.Info("取消等待超时，已退出")
+		}
+		return context.Canceled
+	}
 
 	success := int(successCount.Load())
 	failed := int(failedCount.Load())
@@ -218,14 +317,22 @@ func runGenerateTask(
 	log *Logger,
 	opts GenOptions,
 	task generateTask,
+	onJobSubmitted func(jobID string),
 ) bool {
 	tenantForLog := ex.TenantID
 	var elapsedForLog int64
 
 	resp, err := api.Generate(ctx, ex.AccessToken, client.GenerateReq{InputMarkdown: task.file.Content, CandidateCount: 1})
 	if err != nil {
+		if isContextCanceledErr(err) {
+			log.Info(fmt.Sprintf("%s 已取消", taskPrefix(tenantForLog, elapsedForLog, task.label)))
+			return false
+		}
 		log.Info(fmt.Sprintf("%s 生成失败：%v", taskPrefix(tenantForLog, elapsedForLog, task.label), err))
 		return false
+	}
+	if onJobSubmitted != nil {
+		onJobSubmitted(resp.JobID)
 	}
 
 	traceOffset := 0
@@ -303,6 +410,10 @@ func runGenerateTask(
 		}
 		stResp, err := api.Job(ctx, ex.AccessToken, resp.JobID)
 		if err != nil {
+			if isContextCanceledErr(err) {
+				log.Info(fmt.Sprintf("%s 已取消", taskPrefix(tenantForLog, elapsedForLog, task.label)))
+				return false
+			}
 			log.Info(fmt.Sprintf("%s 生成失败：%v", taskPrefix(tenantForLog, elapsedForLog, task.label), err))
 			return false
 		}
@@ -350,8 +461,30 @@ func runGenerateTask(
 			log.Info(fmt.Sprintf("%s 生成失败：%s", taskPrefix(tenantForLog, elapsedForLog, task.label), stResp.Error))
 			return false
 		}
+		if stResp.Status == "cancelled" {
+			drainTrace()
+			log.Info(fmt.Sprintf("%s 生成已取消", taskPrefix(tenantForLog, elapsedForLog, task.label)))
+			return false
+		}
 		time.Sleep(time.Duration(pollIntervalMs) * time.Millisecond)
 	}
+}
+
+func isContextCanceledErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "interrupt signal received") {
+		return true
+	}
+	if strings.Contains(msg, "operation was canceled") || strings.Contains(msg, "operation was cancelled") {
+		return true
+	}
+	return false
 }
 
 func shouldSkipVerboseHTTPTrace(verbose bool, ev client.TraceEvent) bool {
@@ -420,6 +553,10 @@ func renderWorkerTraceLine(item client.JobTraceItem, colorizeLabel bool) string 
 		return fmt.Sprintf("执行完成%s", tailDuration(item.Payload, "duration_ms", colorizeLabel))
 	case "job_failed":
 		return fmt.Sprintf("执行失败：%s", shortText(stringPayload(item.Payload, "error"), 120))
+	case "job_cancel_requested":
+		return "取消请求已提交"
+	case "job_cancelled":
+		return "任务已取消"
 	case "generation_ok":
 		return fmt.Sprintf("生成阶段完成%s", tailDuration(item.Payload, "timing_ms", colorizeLabel))
 	}
