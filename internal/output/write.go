@@ -6,12 +6,16 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const alphabet = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
-func random8() (string, error) {
-	b := make([]byte, 8)
+func randomN(n int) (string, error) {
+	if n <= 0 {
+		return "", fmt.Errorf("随机长度必须大于0")
+	}
+	b := make([]byte, n)
 	for i := range b {
 		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(alphabet))))
 		if err != nil {
@@ -22,17 +26,34 @@ func random8() (string, error) {
 	return string(b), nil
 }
 
-func UniquePair(outDir string) (string, string, string, error) {
+func outputBaseName(inputPath string) string {
+	base := filepath.Base(strings.TrimSpace(inputPath))
+	if base == "" || base == "." {
+		return "listing"
+	}
+	ext := filepath.Ext(base)
+	if ext != "" {
+		base = strings.TrimSuffix(base, ext)
+	}
+	base = strings.TrimSpace(base)
+	if base == "" || base == "." {
+		return "listing"
+	}
+	return base
+}
+
+func UniquePair(outDir string, inputPath string) (string, string, string, error) {
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return "", "", "", err
 	}
-	for i := 0; i < 100; i++ {
-		s, err := random8()
+	base := outputBaseName(inputPath)
+	for i := 0; i < 200; i++ {
+		s, err := randomN(4)
 		if err != nil {
 			return "", "", "", err
 		}
-		en := filepath.Join(outDir, fmt.Sprintf("listing_%s_en.md", s))
-		cn := filepath.Join(outDir, fmt.Sprintf("listing_%s_cn.md", s))
+		en := filepath.Join(outDir, fmt.Sprintf("%s_%s_en.md", base, s))
+		cn := filepath.Join(outDir, fmt.Sprintf("%s_%s_cn.md", base, s))
 		if _, err := os.Stat(en); err == nil {
 			continue
 		}

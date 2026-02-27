@@ -10,17 +10,17 @@ import (
 
 func TestUniquePair_Success(t *testing.T) {
 	dir := t.TempDir()
-	s, en, cn, err := UniquePair(dir)
+	s, en, cn, err := UniquePair(dir, "pinpai.md")
 	if err != nil {
 		t.Fatalf("UniquePair error: %v", err)
 	}
-	if len(s) != 8 {
-		t.Fatalf("id len=%d want=8", len(s))
+	if len(s) != 4 {
+		t.Fatalf("id len=%d want=4", len(s))
 	}
-	if !strings.HasPrefix(filepath.Base(en), "listing_") || !strings.HasSuffix(en, "_en.md") {
+	if !strings.HasPrefix(filepath.Base(en), "pinpai_") || !strings.HasSuffix(en, "_en.md") {
 		t.Fatalf("unexpected en path: %s", en)
 	}
-	if !strings.HasPrefix(filepath.Base(cn), "listing_") || !strings.HasSuffix(cn, "_cn.md") {
+	if !strings.HasPrefix(filepath.Base(cn), "pinpai_") || !strings.HasSuffix(cn, "_cn.md") {
 		t.Fatalf("unexpected cn path: %s", cn)
 	}
 }
@@ -31,7 +31,7 @@ func TestUniquePair_MkdirError(t *testing.T) {
 	if err := os.WriteFile(fileAsDir, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, err := UniquePair(fileAsDir); err == nil {
+	if _, _, _, err := UniquePair(fileAsDir, "x.md"); err == nil {
 		t.Fatal("expected mkdir error")
 	}
 }
@@ -48,7 +48,7 @@ func TestUniquePair_Concurrent_NoCollision(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			s, en, cn, err := UniquePair(dir)
+			s, en, cn, err := UniquePair(dir, "pinpai.md")
 			if err != nil {
 				mu.Lock()
 				errs = append(errs, err)

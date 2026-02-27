@@ -424,7 +424,7 @@ func runGenerateTask(
 				log.Info(fmt.Sprintf("%s 生成失败：读取结果失败: %v", taskPrefix(tenantForLog, elapsedForLog, task.label), err))
 				return false
 			}
-			_, enPath, cnPath, err := output.UniquePair(opts.OutputDir)
+			_, enPath, cnPath, err := output.UniquePair(opts.OutputDir, task.file.Path)
 			if err != nil {
 				log.Info(fmt.Sprintf("%s 生成失败：输出文件名失败: %v", taskPrefix(tenantForLog, elapsedForLog, task.label), err))
 				return false
