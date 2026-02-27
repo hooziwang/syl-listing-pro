@@ -35,8 +35,31 @@ brew update && brew upgrade hooziwang/tap/syl-listing-pro
 
 ### Windows（Scoop）
 
+首次使用（本机还没有 Scoop）：
+
 ```powershell
-scoop update; scoop bucket add hooziwang https://github.com/hooziwang/scoop-bucket.git; scoop install syl-listing-pro
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+iwr -useb get.scoop.sh | iex
+```
+
+安装后请关闭并重新打开 PowerShell，然后验证：
+
+```powershell
+scoop --version
+```
+
+如果提示 `无法将“scoop”项识别为 cmdlet`，先把 Scoop shims 加入用户 PATH，再重开终端：
+
+```powershell
+[Environment]::SetEnvironmentVariable("Path", $env:Path + ";$env:USERPROFILE\\scoop\\shims", "User")
+```
+
+安装 `syl-listing-pro`：
+
+```powershell
+scoop update
+scoop bucket add hooziwang https://github.com/hooziwang/scoop-bucket.git
+scoop install syl-listing-pro
 ```
 
 说明：会自动安装依赖 `syl-md2doc` 和 `pandoc`。
