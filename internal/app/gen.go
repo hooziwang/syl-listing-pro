@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -13,6 +14,11 @@ import (
 	"syl-listing-pro/internal/input"
 	"syl-listing-pro/internal/output"
 	"syl-listing-pro/internal/rules"
+)
+
+var (
+	lineLengthConstraintPattern = regexp.MustCompile(`^第(\d+)条长度不满足约束:\s*(\d+)（规则区间 \[(\d+),(\d+)\]，容差区间 \[(\d+),(\d+)\]）$`)
+	textLengthConstraintPattern = regexp.MustCompile(`^长度不满足约束:\s*(\d+)（规则区间 \[(\d+),(\d+)\]，容差区间 \[(\d+),(\d+)\]）$`)
 )
 
 type GenOptions struct {
@@ -133,6 +139,7 @@ func RunGen(ctx context.Context, opts GenOptions) error {
 
 			traceOffset := 0
 			traceWarned := false
+			lastTraceLine := ""
 			drainTrace := func() {
 				for i := 0; i < 3; i++ {
 					tr, trErr := api.JobTrace(ctx, ex.AccessToken, resp.JobID, traceOffset, 300)
@@ -179,6 +186,12 @@ func RunGen(ctx context.Context, opts GenOptions) error {
 						}
 						msg := renderWorkerTraceLine(item, !opts.Verbose)
 						if strings.TrimSpace(msg) != "" {
+							if !opts.Verbose {
+								if msg == lastTraceLine {
+									continue
+								}
+								lastTraceLine = msg
+							}
 							log.Info(fmt.Sprintf("%s %s", tracePrefix(tenantForLog, elapsedForLog), msg))
 						}
 					}
@@ -329,9 +342,9 @@ func genericWorkerTraceLine(item client.JobTraceItem, colorizeLabel bool) string
 	case strings.HasSuffix(item.Event, "_start") && step != "":
 		return ""
 	case strings.Contains(item.Event, "repair_needed"):
-		return fmt.Sprintf("%s规则校验失败（%s）：%s", label, errorCountLabel(item.Payload), errorPreview(item.Payload, 0))
+		return fmt.Sprintf("%s规则校验失败：%s", label, errorPreviewMultiline(item.Payload))
 	case strings.Contains(item.Event, "validate_fail"):
-		return fmt.Sprintf("%s规则校验失败：%s", label, errorPreview(item.Payload, 0))
+		return fmt.Sprintf("%s规则校验失败：%s", label, errorPreviewMultiline(item.Payload))
 	case strings.HasSuffix(item.Event, "_repair_ok"):
 		return fmt.Sprintf("%s修复完成", label)
 	case strings.HasSuffix(item.Event, "_ok") && step != "":
@@ -573,6 +586,47 @@ func errorPreview(payload map[string]any, max int) string {
 	}
 	head := strings.Join(errs[:max], "；")
 	return fmt.Sprintf("%s；...（其余%d条）", head, len(errs)-max)
+}
+
+func errorPreviewMultiline(payload map[string]any) string {
+	errs := allErrors(payload)
+	if len(errs) == 0 {
+		return firstError(payload)
+	}
+	formatted := make([]string, 0, len(errs))
+	for _, errText := range errs {
+		formatted = append(formatted, formatValidationError(errText))
+	}
+	return "\n           " + strings.Join(formatted, "；\n           ")
+}
+
+func formatValidationError(errText string) string {
+	errText = strings.TrimSpace(errText)
+	if errText == "" {
+		return "未知错误"
+	}
+	if matched := lineLengthConstraintPattern.FindStringSubmatch(errText); len(matched) == 7 {
+		return fmt.Sprintf("第%s条长度不满足约束: %s", matched[1], formatLengthConstraintRange(matched[2], matched[3], matched[4], matched[5], matched[6]))
+	}
+	if matched := textLengthConstraintPattern.FindStringSubmatch(errText); len(matched) == 6 {
+		return fmt.Sprintf("长度不满足约束: %s", formatLengthConstraintRange(matched[1], matched[2], matched[3], matched[4], matched[5]))
+	}
+	return errText
+}
+
+func formatLengthConstraintRange(actualStr, ruleMinStr, ruleMaxStr, tolMinStr, tolMaxStr string) string {
+	actual, err1 := strconv.Atoi(actualStr)
+	ruleMin, err2 := strconv.Atoi(ruleMinStr)
+	ruleMax, err3 := strconv.Atoi(ruleMaxStr)
+	tolMin, err4 := strconv.Atoi(tolMinStr)
+	tolMax, err5 := strconv.Atoi(tolMaxStr)
+	if err1 != nil || err2 != nil || err3 != nil || err4 != nil || err5 != nil {
+		return fmt.Sprintf("%s ? [%s[%s,%s]%s]", actualStr, tolMinStr, ruleMinStr, ruleMaxStr, tolMaxStr)
+	}
+	if actual < tolMin {
+		return fmt.Sprintf("%d < [%d[%d,%d]%d] 低于下限", actual, tolMin, ruleMin, ruleMax, tolMax)
+	}
+	return fmt.Sprintf("[%d[%d,%d]%d] < %d 高于上限", tolMin, ruleMin, ruleMax, tolMax, actual)
 }
 
 func targetsLabel(payload map[string]any) string {
