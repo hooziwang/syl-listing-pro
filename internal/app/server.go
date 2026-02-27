@@ -1,8 +1,8 @@
 package app
 
-const workerBaseURL = "https://worker.aelus.tech"
+var workerBaseURL = "https://worker.aelus.tech"
 
-const (
+var (
 	pollIntervalMs    = 800
 	pollTimeoutSecond = 900
 )

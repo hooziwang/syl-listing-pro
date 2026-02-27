@@ -1,0 +1,640 @@
+package app
+
+import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
+	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+
+	"syl-listing-pro/internal/rules"
+)
+
+type signedRulesArtifact struct {
+	ArchiveBytes              []byte
+	ManifestSHA               string
+	ArchiveSignatureBase64    string
+	SigningPublicKeyPathInTar string
+	SigningPublicKeySigBase64 string
+}
+
+func repoRootPrivateKeyPath() string {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		return ""
+	}
+	// this file: <repo>/cli/internal/app/run_integration_test.go
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", "..", ".."))
+	return filepath.Join(repoRoot, "rules", "keys", "rules_private.pem")
+}
+
+func runCmd(t *testing.T, name string, args ...string) {
+	t.Helper()
+	cmd := exec.Command(name, args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("run %s %v failed: %v, out=%s", name, args, err, string(out))
+	}
+}
+
+func makeSignedRulesArtifact(t *testing.T, marker string) signedRulesArtifact {
+	t.Helper()
+	if _, err := exec.LookPath("openssl"); err != nil {
+		t.Skip("openssl 不可用")
+	}
+	rootPriv := repoRootPrivateKeyPath()
+	if _, err := os.Stat(rootPriv); err != nil {
+		t.Skipf("未找到 rules 私钥: %s", rootPriv)
+	}
+
+	work := t.TempDir()
+	signPriv := filepath.Join(work, "signing_private.pem")
+	signPub := filepath.Join(work, "signing_public.pem")
+	keySig := filepath.Join(work, "signing_public.sig")
+	archiveSig := filepath.Join(work, "archive.sig")
+
+	runCmd(t, "openssl", "genpkey", "-algorithm", "RSA", "-out", signPriv, "-pkeyopt", "rsa_keygen_bits:2048")
+	runCmd(t, "openssl", "rsa", "-in", signPriv, "-pubout", "-out", signPub)
+
+	signPubBytes, err := os.ReadFile(signPub)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	archiveBuf := &bytes.Buffer{}
+	gz := gzip.NewWriter(archiveBuf)
+	tw := tar.NewWriter(gz)
+	inputContent := "file_discovery:\n  marker: \"" + marker + "\"\n"
+	entries := map[string][]byte{
+		"tenant/rules/input.yaml":        []byte(inputContent),
+		"tenant/keys/signing_public.pem": signPubBytes,
+	}
+	for name, body := range entries {
+		hdr := &tar.Header{Name: name, Mode: 0o644, Size: int64(len(body))}
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write(body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	archiveBytes := archiveBuf.Bytes()
+	archivePath := filepath.Join(work, "rules.tar.gz")
+	if err := os.WriteFile(archivePath, archiveBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	runCmd(t, "openssl", "dgst", "-sha256", "-sign", signPriv, "-out", archiveSig, archivePath)
+	runCmd(t, "openssl", "dgst", "-sha256", "-sign", rootPriv, "-out", keySig, signPub)
+
+	sum := sha256.Sum256(archiveBytes)
+	return signedRulesArtifact{
+		ArchiveBytes:              archiveBytes,
+		ManifestSHA:               hex.EncodeToString(sum[:]),
+		ArchiveSignatureBase64:    base64.StdEncoding.EncodeToString(mustReadBytes(t, archiveSig)),
+		SigningPublicKeyPathInTar: "tenant/keys/signing_public.pem",
+		SigningPublicKeySigBase64: base64.StdEncoding.EncodeToString(mustReadBytes(t, keySig)),
+	}
+}
+
+func mustReadBytes(t *testing.T, p string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func makeRulesArchiveBytes(t *testing.T, marker string) []byte {
+	t.Helper()
+	buf := &bytes.Buffer{}
+	gz := gzip.NewWriter(buf)
+	tw := tar.NewWriter(gz)
+	content := "file_discovery:\n  marker: \"" + marker + "\"\n"
+	hdr := &tar.Header{Name: "tenant/rules/input.yaml", Mode: 0o644, Size: int64(len(content))}
+	if err := tw.WriteHeader(hdr); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write([]byte(content)); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func writeKeyEnvForTest(t *testing.T, home string) {
+	t.Helper()
+	envPath := filepath.Join(home, ".syl-listing-pro", ".env")
+	if err := os.MkdirAll(filepath.Dir(envPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(envPath, []byte("SYL_LISTING_KEY=test-key\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func captureStdoutRun(t *testing.T, fn func() error) (string, error) {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	done := make(chan string, 1)
+	go func() {
+		b, _ := io.ReadAll(r)
+		done <- string(b)
+	}()
+	errRun := fn()
+	_ = w.Close()
+	os.Stdout = old
+	return <-done, errRun
+}
+
+func TestRunGen_SuccessWithCachedRules(t *testing.T) {
+	home := t.TempDir()
+	cacheHome := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", cacheHome)
+	writeKeyEnvForTest(t, home)
+
+	cacheDir, err := rules.DefaultCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	archiveBytes := makeRulesArchiveBytes(t, "#MARK")
+	archivePath, err := rules.SaveArchive(cacheDir, "demo", "v1", archiveBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rules.SaveState(cacheDir, "demo", rules.CacheState{RulesVersion: "v1", ManifestSHA: "sha", ArchivePath: archivePath}); err != nil {
+		t.Fatal(err)
+	}
+
+	var traceOnce bool
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/auth/exchange":
+			_, _ = io.WriteString(w, `{"access_token":"at","tenant_id":"demo","expires_in":3600}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/rules/resolve":
+			_, _ = io.WriteString(w, `{"up_to_date":true,"rules_version":"v1"}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/generate":
+			_, _ = io.WriteString(w, `{"job_id":"job_1","status":"queued"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job_1/trace":
+			if !traceOnce {
+				traceOnce = true
+				_, _ = io.WriteString(w, `{"ok":true,"job_id":"job_1","job_status":"running","tenant_id":"demo","trace_count":3,"limit":300,"offset":0,"next_offset":3,"has_more":false,"items":[{"source":"engine","event":"generate_queued","tenant_id":"demo","job_id":"job_1","elapsed_ms":0,"payload":{}},{"source":"engine","event":"rules_loaded","tenant_id":"demo","job_id":"job_1","elapsed_ms":1,"payload":{"rules_version":"v1"}},{"source":"engine","event":"generation_ok","tenant_id":"demo","job_id":"job_1","elapsed_ms":2,"payload":{"timing_ms":2}}]}`)
+				return
+			}
+			_, _ = io.WriteString(w, `{"ok":true,"job_id":"job_1","job_status":"running","tenant_id":"demo","trace_count":0,"limit":300,"offset":3,"next_offset":3,"has_more":false,"items":[]}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job_1":
+			_, _ = io.WriteString(w, `{"job_id":"job_1","status":"succeeded"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job_1/result":
+			_, _ = io.WriteString(w, `{"en_markdown":"# EN","cn_markdown":"# CN"}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+
+	oldBase := workerBaseURL
+	oldPollMs := pollIntervalMs
+	oldPollTimeout := pollTimeoutSecond
+	workerBaseURL = ts.URL
+	pollIntervalMs = 1
+	pollTimeoutSecond = 5
+	defer func() {
+		workerBaseURL = oldBase
+		pollIntervalMs = oldPollMs
+		pollTimeoutSecond = oldPollTimeout
+	}()
+
+	inputPath := filepath.Join(t.TempDir(), "req.md")
+	if err := os.WriteFile(inputPath, []byte("#MARK\ninput content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	outDir := t.TempDir()
+	if err := RunGen(context.Background(), GenOptions{OutputDir: outDir, Inputs: []string{inputPath}}); err != nil {
+		t.Fatalf("RunGen error: %v", err)
+	}
+
+	ents, err := os.ReadDir(outDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ents) != 2 {
+		t.Fatalf("expected 2 output files, got %d", len(ents))
+	}
+}
+
+func TestRunUpdateRules_UpToDate(t *testing.T) {
+	home := t.TempDir()
+	cacheHome := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", cacheHome)
+	writeKeyEnvForTest(t, home)
+
+	cacheDir, err := rules.DefaultCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	archivePath, err := rules.SaveArchive(cacheDir, "demo", "v1", makeRulesArchiveBytes(t, "#MARK"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rules.SaveState(cacheDir, "demo", rules.CacheState{RulesVersion: "v1", ManifestSHA: "sha", ArchivePath: archivePath}); err != nil {
+		t.Fatal(err)
+	}
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/auth/exchange":
+			_, _ = io.WriteString(w, `{"access_token":"at","tenant_id":"demo","expires_in":3600}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/rules/resolve":
+			_, _ = io.WriteString(w, `{"up_to_date":true,"rules_version":"v1"}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+
+	oldBase := workerBaseURL
+	workerBaseURL = ts.URL
+	defer func() { workerBaseURL = oldBase }()
+
+	out, err := captureStdoutRun(t, func() error {
+		return RunUpdateRules(context.Background(), UpdateRulesOptions{})
+	})
+	if err != nil {
+		t.Fatalf("RunUpdateRules error: %v", err)
+	}
+	if !strings.Contains(out, "v1") {
+		t.Fatalf("expected rules version output, got: %q", out)
+	}
+}
+
+func TestRunGen_GenerateAndJobFailurePaths(t *testing.T) {
+	home := t.TempDir()
+	cacheHome := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", cacheHome)
+	writeKeyEnvForTest(t, home)
+
+	cacheDir, err := rules.DefaultCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	archivePath, err := rules.SaveArchive(cacheDir, "demo", "v1", makeRulesArchiveBytes(t, "#MARK"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rules.SaveState(cacheDir, "demo", rules.CacheState{RulesVersion: "v1", ManifestSHA: "sha", ArchivePath: archivePath}); err != nil {
+		t.Fatal(err)
+	}
+
+	inputPath := filepath.Join(t.TempDir(), "req.md")
+	if err := os.WriteFile(inputPath, []byte("#MARK\ncontent"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 子用例1：generate 直接失败（400 非重试）
+	t.Run("generate_failed", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodPost && r.URL.Path == "/v1/auth/exchange":
+				_, _ = io.WriteString(w, `{"access_token":"at","tenant_id":"demo","expires_in":3600}`)
+			case r.Method == http.MethodGet && r.URL.Path == "/v1/rules/resolve":
+				_, _ = io.WriteString(w, `{"up_to_date":true,"rules_version":"v1"}`)
+			case r.Method == http.MethodPost && r.URL.Path == "/v1/generate":
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, "bad req")
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		defer ts.Close()
+
+		oldBase := workerBaseURL
+		workerBaseURL = ts.URL
+		defer func() { workerBaseURL = oldBase }()
+
+		err := RunGen(context.Background(), GenOptions{OutputDir: t.TempDir(), Inputs: []string{inputPath}})
+		if err == nil || !strings.Contains(err.Error(), "存在失败任务") {
+			t.Fatalf("unexpected err: %v", err)
+		}
+	})
+
+	// 子用例2：job 轮询返回 failed
+	t.Run("job_failed", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodPost && r.URL.Path == "/v1/auth/exchange":
+				_, _ = io.WriteString(w, `{"access_token":"at","tenant_id":"demo","expires_in":3600}`)
+			case r.Method == http.MethodGet && r.URL.Path == "/v1/rules/resolve":
+				_, _ = io.WriteString(w, `{"up_to_date":true,"rules_version":"v1"}`)
+			case r.Method == http.MethodPost && r.URL.Path == "/v1/generate":
+				_, _ = io.WriteString(w, `{"job_id":"job_failed","status":"queued"}`)
+			case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job_failed/trace":
+				_, _ = io.WriteString(w, `{"ok":true,"job_id":"job_failed","job_status":"running","tenant_id":"demo","trace_count":0,"limit":300,"offset":0,"next_offset":0,"has_more":false,"items":[]}`)
+			case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job_failed":
+				_, _ = io.WriteString(w, `{"job_id":"job_failed","status":"failed","error":"engine failed"}`)
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		defer ts.Close()
+
+		oldBase := workerBaseURL
+		oldPoll := pollIntervalMs
+		workerBaseURL = ts.URL
+		pollIntervalMs = 1
+		defer func() {
+			workerBaseURL = oldBase
+			pollIntervalMs = oldPoll
+		}()
+
+		err := RunGen(context.Background(), GenOptions{OutputDir: t.TempDir(), Inputs: []string{inputPath}})
+		if err == nil || !strings.Contains(err.Error(), "存在失败任务") {
+			t.Fatalf("unexpected err: %v", err)
+		}
+	})
+}
+
+func TestRunGen_Timeout(t *testing.T) {
+	home := t.TempDir()
+	cacheHome := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", cacheHome)
+	writeKeyEnvForTest(t, home)
+
+	cacheDir, err := rules.DefaultCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	archivePath, err := rules.SaveArchive(cacheDir, "demo", "v1", makeRulesArchiveBytes(t, "#MARK"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rules.SaveState(cacheDir, "demo", rules.CacheState{RulesVersion: "v1", ManifestSHA: "sha", ArchivePath: archivePath}); err != nil {
+		t.Fatal(err)
+	}
+	inputPath := filepath.Join(t.TempDir(), "req.md")
+	if err := os.WriteFile(inputPath, []byte("#MARK\ncontent"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/auth/exchange":
+			_, _ = io.WriteString(w, `{"access_token":"at","tenant_id":"demo","expires_in":3600}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/rules/resolve":
+			_, _ = io.WriteString(w, `{"up_to_date":true,"rules_version":"v1"}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/generate":
+			_, _ = io.WriteString(w, `{"job_id":"job_timeout","status":"queued"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job_timeout/trace":
+			_, _ = io.WriteString(w, `{"ok":true,"job_id":"job_timeout","job_status":"running","tenant_id":"demo","trace_count":0,"limit":300,"offset":0,"next_offset":0,"has_more":false,"items":[]}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job_timeout":
+			_, _ = io.WriteString(w, `{"job_id":"job_timeout","status":"running"}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+
+	oldBase := workerBaseURL
+	oldPoll := pollIntervalMs
+	oldTimeout := pollTimeoutSecond
+	workerBaseURL = ts.URL
+	pollIntervalMs = 1
+	pollTimeoutSecond = 1
+	defer func() {
+		workerBaseURL = oldBase
+		pollIntervalMs = oldPoll
+		pollTimeoutSecond = oldTimeout
+	}()
+
+	err = RunGen(context.Background(), GenOptions{OutputDir: t.TempDir(), Inputs: []string{inputPath}})
+	if err == nil || !strings.Contains(err.Error(), "存在失败任务") {
+		t.Fatalf("unexpected err: %v", err)
+	}
+}
+
+func TestRunUpdateRules_ErrorBranches(t *testing.T) {
+	home := t.TempDir()
+	cacheHome := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", cacheHome)
+	writeKeyEnvForTest(t, home)
+
+	// resolve 失败 + 本地有缓存 => 回退成功
+	t.Run("resolve_error_with_cache", func(t *testing.T) {
+		cacheDir, err := rules.DefaultCacheDir()
+		if err != nil {
+			t.Fatal(err)
+		}
+		archivePath, err := rules.SaveArchive(cacheDir, "demo", "v1", makeRulesArchiveBytes(t, "#MARK"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := rules.SaveState(cacheDir, "demo", rules.CacheState{RulesVersion: "v1", ManifestSHA: "sha", ArchivePath: archivePath}); err != nil {
+			t.Fatal(err)
+		}
+
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodPost && r.URL.Path == "/v1/auth/exchange":
+				_, _ = io.WriteString(w, `{"access_token":"at","tenant_id":"demo","expires_in":3600}`)
+			case r.Method == http.MethodGet && r.URL.Path == "/v1/rules/resolve":
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, "bad")
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		defer ts.Close()
+
+		oldBase := workerBaseURL
+		workerBaseURL = ts.URL
+		defer func() { workerBaseURL = oldBase }()
+
+		if err := RunUpdateRules(context.Background(), UpdateRulesOptions{}); err != nil {
+			t.Fatalf("RunUpdateRules fallback error: %v", err)
+		}
+	})
+
+	// resolve 失败 + 本地无缓存 => 报错
+	t.Run("resolve_error_no_cache", func(t *testing.T) {
+		cacheDir, err := rules.DefaultCacheDir()
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = rules.Clear(cacheDir, "demo")
+
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodPost && r.URL.Path == "/v1/auth/exchange":
+				_, _ = io.WriteString(w, `{"access_token":"at","tenant_id":"demo","expires_in":3600}`)
+			case r.Method == http.MethodGet && r.URL.Path == "/v1/rules/resolve":
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, "bad")
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		defer ts.Close()
+
+		oldBase := workerBaseURL
+		workerBaseURL = ts.URL
+		defer func() { workerBaseURL = oldBase }()
+
+		err = RunUpdateRules(context.Background(), UpdateRulesOptions{})
+		if err == nil || !strings.Contains(err.Error(), "本地无规则缓存") {
+			t.Fatalf("unexpected err: %v", err)
+		}
+	})
+
+	// 非 up_to_date + 下载后 SHA 不匹配 => 报错
+	t.Run("download_sha_mismatch", func(t *testing.T) {
+		var baseURL string
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodPost && r.URL.Path == "/v1/auth/exchange":
+				_, _ = io.WriteString(w, `{"access_token":"at","tenant_id":"demo","expires_in":3600}`)
+			case r.Method == http.MethodGet && r.URL.Path == "/v1/rules/resolve":
+				_, _ = io.WriteString(w, fmt.Sprintf(`{"up_to_date":false,"rules_version":"v2","manifest_sha256":"%s","download_url":"%s/download"}`, strings.Repeat("0", 64), baseURL))
+			case r.Method == http.MethodGet && r.URL.Path == "/download":
+				_, _ = io.WriteString(w, "not-the-same-sha")
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		defer ts.Close()
+		baseURL = ts.URL
+
+		oldBase := workerBaseURL
+		workerBaseURL = ts.URL
+		defer func() { workerBaseURL = oldBase }()
+
+		err := RunUpdateRules(context.Background(), UpdateRulesOptions{Force: true})
+		if err == nil || !strings.Contains(err.Error(), "sha256 不匹配") {
+			t.Fatalf("unexpected err: %v", err)
+		}
+	})
+}
+
+func TestRunUpdateRules_DownloadAndVerifySuccess(t *testing.T) {
+	home := t.TempDir()
+	cacheHome := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", cacheHome)
+	writeKeyEnvForTest(t, home)
+
+	artifact := makeSignedRulesArtifact(t, "#MARK")
+	var baseURL string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/auth/exchange":
+			_, _ = io.WriteString(w, `{"access_token":"at","tenant_id":"demo","expires_in":3600}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/rules/resolve":
+			_, _ = io.WriteString(w, fmt.Sprintf(`{"up_to_date":false,"rules_version":"v2","manifest_sha256":"%s","download_url":"%s/download","signature_base64":"%s","signing_public_key_path_in_archive":"%s","signing_public_key_signature_base64":"%s"}`, artifact.ManifestSHA, baseURL, artifact.ArchiveSignatureBase64, artifact.SigningPublicKeyPathInTar, artifact.SigningPublicKeySigBase64))
+		case r.Method == http.MethodGet && r.URL.Path == "/download":
+			_, _ = w.Write(artifact.ArchiveBytes)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+	baseURL = ts.URL
+
+	oldBase := workerBaseURL
+	workerBaseURL = ts.URL
+	defer func() { workerBaseURL = oldBase }()
+
+	out, err := captureStdoutRun(t, func() error {
+		return RunUpdateRules(context.Background(), UpdateRulesOptions{Force: true})
+	})
+	if err != nil {
+		t.Fatalf("RunUpdateRules error: %v", err)
+	}
+	if !strings.Contains(out, "v2") {
+		t.Fatalf("expected version output, got: %q", out)
+	}
+
+	cacheDir, err := rules.DefaultCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := rules.LoadState(cacheDir, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.RulesVersion != "v2" || !rules.HasArchive(st.ArchivePath) {
+		t.Fatalf("state not updated: %+v", st)
+	}
+}
+
+func TestRunGen_FirstRunDownloadRulesThenGenerateFail(t *testing.T) {
+	home := t.TempDir()
+	cacheHome := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", cacheHome)
+	writeKeyEnvForTest(t, home)
+
+	artifact := makeSignedRulesArtifact(t, "#MARK")
+	var baseURL string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/auth/exchange":
+			_, _ = io.WriteString(w, `{"access_token":"at","tenant_id":"demo","expires_in":3600}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/rules/resolve":
+			_, _ = io.WriteString(w, fmt.Sprintf(`{"up_to_date":false,"rules_version":"v3","manifest_sha256":"%s","download_url":"%s/download","signature_base64":"%s","signing_public_key_path_in_archive":"%s","signing_public_key_signature_base64":"%s"}`, artifact.ManifestSHA, baseURL, artifact.ArchiveSignatureBase64, artifact.SigningPublicKeyPathInTar, artifact.SigningPublicKeySigBase64))
+		case r.Method == http.MethodGet && r.URL.Path == "/download":
+			_, _ = w.Write(artifact.ArchiveBytes)
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/generate":
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, "bad")
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+	baseURL = ts.URL
+
+	oldBase := workerBaseURL
+	workerBaseURL = ts.URL
+	defer func() { workerBaseURL = oldBase }()
+
+	inputPath := filepath.Join(t.TempDir(), "req.md")
+	if err := os.WriteFile(inputPath, []byte("#MARK\ncontent"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := RunGen(context.Background(), GenOptions{OutputDir: t.TempDir(), Inputs: []string{inputPath}})
+	if err == nil || !strings.Contains(err.Error(), "存在失败任务") {
+		t.Fatalf("unexpected err: %v", err)
+	}
+}
