@@ -4,11 +4,15 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"crypto"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -34,28 +38,21 @@ func VerifyArchiveSignatureWithBundledKeyOpenSSL(
 	if err != nil {
 		return err
 	}
+	rootPublicKeyBytes, err := os.ReadFile(rootPublicPath)
+	if err != nil {
+		return fmt.Errorf("读取根公钥失败: %w", err)
+	}
 
 	signingPublicKeyBytes, err := extractFileFromTarGz(archivePath, signingPublicKeyPathInArchive)
 	if err != nil {
 		return err
 	}
-	tmpSigningPublicKey := filepath.Join(cacheDir, ".rules_signing_public.pem.tmp")
-	if err := os.WriteFile(tmpSigningPublicKey, signingPublicKeyBytes, 0o644); err != nil {
-		return fmt.Errorf("写签名公钥临时文件失败: %w", err)
-	}
-	defer os.Remove(tmpSigningPublicKey)
 
 	keySig, err := base64.StdEncoding.DecodeString(signingPublicKeySignatureBase64)
 	if err != nil {
 		return fmt.Errorf("解析签名公钥签名失败: %w", err)
 	}
-	tmpKeySig := filepath.Join(cacheDir, ".rules_signing_public.sig.tmp")
-	if err := os.WriteFile(tmpKeySig, keySig, 0o600); err != nil {
-		return fmt.Errorf("写签名公钥签名临时文件失败: %w", err)
-	}
-	defer os.Remove(tmpKeySig)
-
-	if err := verifyWithOpenSSL(rootPublicPath, tmpSigningPublicKey, tmpKeySig); err != nil {
+	if err := verifySignature(rootPublicKeyBytes, signingPublicKeyBytes, keySig); err != nil {
 		return fmt.Errorf("规则签名公钥验签失败: %w", err)
 	}
 
@@ -63,13 +60,11 @@ func VerifyArchiveSignatureWithBundledKeyOpenSSL(
 	if err != nil {
 		return fmt.Errorf("解析规则包签名失败: %w", err)
 	}
-	tmpArchiveSig := filepath.Join(cacheDir, ".rules_archive.sig.tmp")
-	if err := os.WriteFile(tmpArchiveSig, archiveSig, 0o600); err != nil {
-		return fmt.Errorf("写规则包签名临时文件失败: %w", err)
+	archiveBytes, err := os.ReadFile(archivePath)
+	if err != nil {
+		return fmt.Errorf("读取规则包失败: %w", err)
 	}
-	defer os.Remove(tmpArchiveSig)
-
-	if err := verifyWithOpenSSL(tmpSigningPublicKey, archivePath, tmpArchiveSig); err != nil {
+	if err := verifySignature(signingPublicKeyBytes, archiveBytes, archiveSig); err != nil {
 		return fmt.Errorf("规则包验签失败: %w", err)
 	}
 	return nil
@@ -138,11 +133,58 @@ func extractFileFromTarGz(archivePath, targetPath string) ([]byte, error) {
 	return nil, fmt.Errorf("规则包内未找到签名公钥: %s", targetPath)
 }
 
-func verifyWithOpenSSL(publicKeyPath, targetPath, signaturePath string) error {
-	cmd := exec.Command("openssl", "dgst", "-sha256", "-verify", publicKeyPath, "-signature", signaturePath, targetPath)
-	b, err := cmd.CombinedOutput()
+func parseRSAPublicKey(publicKeyPEM []byte) (*rsa.PublicKey, error) {
+	block, _ := pem.Decode(publicKeyPEM)
+	if block == nil {
+		return nil, fmt.Errorf("无效 PEM 公钥")
+	}
+	switch block.Type {
+	case "RSA PUBLIC KEY":
+		pub, err := x509.ParsePKCS1PublicKey(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("解析 RSA 公钥失败: %w", err)
+		}
+		return pub, nil
+	case "PUBLIC KEY":
+		parsed, err := x509.ParsePKIXPublicKey(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("解析公钥失败: %w", err)
+		}
+		pub, ok := parsed.(*rsa.PublicKey)
+		if !ok {
+			return nil, fmt.Errorf("公钥算法不是 RSA")
+		}
+		return pub, nil
+	default:
+		return nil, fmt.Errorf("不支持的公钥类型: %s", block.Type)
+	}
+}
+
+func verifySignature(publicKeyPEM, payload, signature []byte) error {
+	pub, err := parseRSAPublicKey(publicKeyPEM)
 	if err != nil {
-		return fmt.Errorf("%v %s", err, string(b))
+		return err
+	}
+	sum := sha256.Sum256(payload)
+	if err := rsa.VerifyPKCS1v15(pub, crypto.SHA256, sum[:], signature); err != nil {
+		return err
 	}
 	return nil
+}
+
+// 保留历史函数名，内部改为 Go 原生验签实现，避免依赖 openssl。
+func verifyWithOpenSSL(publicKeyPath, targetPath, signaturePath string) error {
+	publicKeyBytes, err := os.ReadFile(publicKeyPath)
+	if err != nil {
+		return fmt.Errorf("读取公钥失败: %w", err)
+	}
+	payload, err := os.ReadFile(targetPath)
+	if err != nil {
+		return fmt.Errorf("读取待验签文件失败: %w", err)
+	}
+	signature, err := os.ReadFile(signaturePath)
+	if err != nil {
+		return fmt.Errorf("读取签名文件失败: %w", err)
+	}
+	return verifySignature(publicKeyBytes, payload, signature)
 }

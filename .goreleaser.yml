@@ -59,6 +59,9 @@ brews:
     directory: Formula
     homepage: "https://github.com/hooziwang/syl-listing-pro"
     description: "多租户亚马逊 Listing 双语生成 CLI"
+    dependencies:
+      - name: syl-md2doc
+      - name: pandoc
     commit_author:
       name: github-actions[bot]
       email: 41898282+github-actions[bot]@users.noreply.github.com
@@ -74,6 +77,9 @@ scoops:
     directory: bucket
     homepage: "https://github.com/hooziwang/syl-listing-pro"
     description: "多租户亚马逊 Listing 双语生成 CLI"
+    depends:
+      - syl-md2doc
+      - pandoc
     commit_author:
       name: github-actions[bot]
       email: 41898282+github-actions[bot]@users.noreply.github.com

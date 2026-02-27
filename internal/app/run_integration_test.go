@@ -5,15 +5,19 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -40,37 +44,72 @@ func repoRootPrivateKeyPath() string {
 	return filepath.Join(repoRoot, "rules", "keys", "rules_private.pem")
 }
 
-func runCmd(t *testing.T, name string, args ...string) {
+func mustSignSHA256(t *testing.T, priv *rsa.PrivateKey, payload []byte) []byte {
 	t.Helper()
-	cmd := exec.Command(name, args...)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("run %s %v failed: %v, out=%s", name, args, err, string(out))
+	sum := sha256.Sum256(payload)
+	sig, err := rsa.SignPKCS1v15(rand.Reader, priv, crypto.SHA256, sum[:])
+	if err != nil {
+		t.Fatalf("sign failed: %v", err)
 	}
+	return sig
+}
+
+func mustLoadRSAPrivateKey(t *testing.T, path string) *rsa.PrivateKey {
+	t.Helper()
+	pemBytes, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read private key failed: %v", err)
+	}
+	block, _ := pem.Decode(pemBytes)
+	if block == nil {
+		t.Fatal("invalid private key pem")
+	}
+	switch block.Type {
+	case "PRIVATE KEY":
+		parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+		if err != nil {
+			t.Fatalf("parse pkcs8 failed: %v", err)
+		}
+		priv, ok := parsed.(*rsa.PrivateKey)
+		if !ok {
+			t.Fatalf("private key is not RSA: %T", parsed)
+		}
+		return priv
+	case "RSA PRIVATE KEY":
+		priv, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+		if err != nil {
+			t.Fatalf("parse pkcs1 failed: %v", err)
+		}
+		return priv
+	default:
+		t.Fatalf("unsupported private key type: %s", block.Type)
+		return nil
+	}
+}
+
+func mustRSAPublicKeyPEM(t *testing.T, pub *rsa.PublicKey) []byte {
+	t.Helper()
+	der, err := x509.MarshalPKIXPublicKey(pub)
+	if err != nil {
+		t.Fatalf("marshal public key failed: %v", err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
 }
 
 func makeSignedRulesArtifact(t *testing.T, marker string) signedRulesArtifact {
 	t.Helper()
-	if _, err := exec.LookPath("openssl"); err != nil {
-		t.Skip("openssl 不可用")
-	}
 	rootPriv := repoRootPrivateKeyPath()
 	if _, err := os.Stat(rootPriv); err != nil {
 		t.Skipf("未找到 rules 私钥: %s", rootPriv)
 	}
+	rootPrivateKey := mustLoadRSAPrivateKey(t, rootPriv)
 
 	work := t.TempDir()
-	signPriv := filepath.Join(work, "signing_private.pem")
-	signPub := filepath.Join(work, "signing_public.pem")
-	keySig := filepath.Join(work, "signing_public.sig")
-	archiveSig := filepath.Join(work, "archive.sig")
-
-	runCmd(t, "openssl", "genpkey", "-algorithm", "RSA", "-out", signPriv, "-pkeyopt", "rsa_keygen_bits:2048")
-	runCmd(t, "openssl", "rsa", "-in", signPriv, "-pubout", "-out", signPub)
-
-	signPubBytes, err := os.ReadFile(signPub)
+	signingPrivateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("generate signing key failed: %v", err)
 	}
+	signPubBytes := mustRSAPublicKeyPEM(t, &signingPrivateKey.PublicKey)
 
 	archiveBuf := &bytes.Buffer{}
 	gz := gzip.NewWriter(archiveBuf)
@@ -101,26 +140,17 @@ func makeSignedRulesArtifact(t *testing.T, marker string) signedRulesArtifact {
 		t.Fatal(err)
 	}
 
-	runCmd(t, "openssl", "dgst", "-sha256", "-sign", signPriv, "-out", archiveSig, archivePath)
-	runCmd(t, "openssl", "dgst", "-sha256", "-sign", rootPriv, "-out", keySig, signPub)
+	archiveSig := mustSignSHA256(t, signingPrivateKey, archiveBytes)
+	keySig := mustSignSHA256(t, rootPrivateKey, signPubBytes)
 
 	sum := sha256.Sum256(archiveBytes)
 	return signedRulesArtifact{
 		ArchiveBytes:              archiveBytes,
 		ManifestSHA:               hex.EncodeToString(sum[:]),
-		ArchiveSignatureBase64:    base64.StdEncoding.EncodeToString(mustReadBytes(t, archiveSig)),
+		ArchiveSignatureBase64:    base64.StdEncoding.EncodeToString(archiveSig),
 		SigningPublicKeyPathInTar: "tenant/keys/signing_public.pem",
-		SigningPublicKeySigBase64: base64.StdEncoding.EncodeToString(mustReadBytes(t, keySig)),
+		SigningPublicKeySigBase64: base64.StdEncoding.EncodeToString(keySig),
 	}
-}
-
-func mustReadBytes(t *testing.T, p string) []byte {
-	t.Helper()
-	b, err := os.ReadFile(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return b
 }
 
 func makeRulesArchiveBytes(t *testing.T, marker string) []byte {

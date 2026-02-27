@@ -3,9 +3,14 @@ package rules
 import (
 	"archive/tar"
 	"compress/gzip"
+	"crypto"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
+	"encoding/pem"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -80,45 +85,56 @@ func TestExtractFileFromTarGz(t *testing.T) {
 	}
 }
 
-func mustRun(t *testing.T, name string, args ...string) {
+func mustSignSHA256(t *testing.T, priv *rsa.PrivateKey, payload []byte) []byte {
 	t.Helper()
-	cmd := exec.Command(name, args...)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("run %s %v failed: %v, out=%s", name, args, err, string(out))
+	sum := sha256.Sum256(payload)
+	sig, err := rsa.SignPKCS1v15(rand.Reader, priv, crypto.SHA256, sum[:])
+	if err != nil {
+		t.Fatalf("sign failed: %v", err)
 	}
+	return sig
+}
+
+func mustRSAPublicKeyPEM(t *testing.T, pub *rsa.PublicKey) []byte {
+	t.Helper()
+	der, err := x509.MarshalPKIXPublicKey(pub)
+	if err != nil {
+		t.Fatalf("marshal public key failed: %v", err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
 }
 
 func TestVerifyArchiveSignatureWithBundledKeyOpenSSL(t *testing.T) {
-	if _, err := exec.LookPath("openssl"); err != nil {
-		t.Skip("openssl not found")
-	}
-
 	work := t.TempDir()
 	cacheDir := filepath.Join(work, "cache")
-	rootPriv := filepath.Join(work, "root_priv.pem")
-	rootPub := filepath.Join(work, "root_pub.pem")
-	signPriv := filepath.Join(work, "sign_priv.pem")
-	signPub := filepath.Join(work, "sign_pub.pem")
-	signPubSig := filepath.Join(work, "sign_pub.sig")
 	archiveSigPath := filepath.Join(work, "archive.sig")
 
-	mustRun(t, "openssl", "genpkey", "-algorithm", "RSA", "-out", rootPriv, "-pkeyopt", "rsa_keygen_bits:2048")
-	mustRun(t, "openssl", "rsa", "-in", rootPriv, "-pubout", "-out", rootPub)
-	mustRun(t, "openssl", "genpkey", "-algorithm", "RSA", "-out", signPriv, "-pkeyopt", "rsa_keygen_bits:2048")
-	mustRun(t, "openssl", "rsa", "-in", signPriv, "-pubout", "-out", signPub)
+	rootPriv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate root key failed: %v", err)
+	}
+	signPriv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate signing key failed: %v", err)
+	}
+	rootPubPEM := mustRSAPublicKeyPEM(t, &rootPriv.PublicKey)
+	signPubPEM := mustRSAPublicKeyPEM(t, &signPriv.PublicKey)
 
-	archivePath := writeArchiveForVerify(t, "tenant/keys/signing_public.pem", mustRead(t, signPub))
+	archivePath := writeArchiveForVerify(t, "tenant/keys/signing_public.pem", signPubPEM)
+	archiveBytes := mustRead(t, archivePath)
 
-	mustRun(t, "openssl", "dgst", "-sha256", "-sign", rootPriv, "-out", signPubSig, signPub)
-	mustRun(t, "openssl", "dgst", "-sha256", "-sign", signPriv, "-out", archiveSigPath, archivePath)
+	keySig := mustSignSHA256(t, rootPriv, signPubPEM)
+	archiveSig := mustSignSHA256(t, signPriv, archiveBytes)
+	if err := os.WriteFile(archiveSigPath, archiveSig, 0o644); err != nil {
+		t.Fatalf("write archive sig failed: %v", err)
+	}
 
-	rootPubBytes := mustRead(t, rootPub)
 	oldRoot := embeddedRootPublicKeyPEM
-	embeddedRootPublicKeyPEM = rootPubBytes
+	embeddedRootPublicKeyPEM = rootPubPEM
 	defer func() { embeddedRootPublicKeyPEM = oldRoot }()
 
-	keySigB64 := base64.StdEncoding.EncodeToString(mustRead(t, signPubSig))
-	archiveSigB64 := base64.StdEncoding.EncodeToString(mustRead(t, archiveSigPath))
+	keySigB64 := base64.StdEncoding.EncodeToString(keySig)
+	archiveSigB64 := base64.StdEncoding.EncodeToString(archiveSig)
 
 	if err := VerifyArchiveSignatureWithBundledKeyOpenSSL(
 		cacheDir,
@@ -134,7 +150,7 @@ func TestVerifyArchiveSignatureWithBundledKeyOpenSSL(t *testing.T) {
 		t.Fatal("expected missing archive signature error")
 	}
 	badArchiveSig := archiveSigB64[:len(archiveSigB64)-4] + "AAAA"
-	err := VerifyArchiveSignatureWithBundledKeyOpenSSL(
+	err = VerifyArchiveSignatureWithBundledKeyOpenSSL(
 		cacheDir,
 		archivePath,
 		badArchiveSig,
