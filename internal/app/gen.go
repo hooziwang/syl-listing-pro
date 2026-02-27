@@ -95,7 +95,13 @@ func RunGen(ctx context.Context, opts GenOptions) error {
 				if sErr != nil {
 					return sErr
 				}
-				if err := rules.VerifySignatureOpenSSL(cacheDir, res.SignatureBase64, p); err != nil {
+				if err := rules.VerifyArchiveSignatureWithBundledKeyOpenSSL(
+					cacheDir,
+					p,
+					res.SignatureBase64,
+					res.SigningPublicKeyPathInArchive,
+					res.SigningPublicKeySignatureBase64,
+				); err != nil {
 					if st.RulesVersion == "" || !rules.HasArchive(st.ArchivePath) {
 						return fmt.Errorf("首次拉规则签名校验失败: %w", err)
 					}

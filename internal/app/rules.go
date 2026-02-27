@@ -72,7 +72,13 @@ func RunUpdateRules(ctx context.Context, opts UpdateRulesOptions) error {
 			if err != nil {
 				return err
 			}
-			if err := rules.VerifySignatureOpenSSL(cacheDir, res.SignatureBase64, p); err != nil {
+			if err := rules.VerifyArchiveSignatureWithBundledKeyOpenSSL(
+				cacheDir,
+				p,
+				res.SignatureBase64,
+				res.SigningPublicKeyPathInArchive,
+				res.SigningPublicKeySignatureBase64,
+			); err != nil {
 				return err
 			}
 			if err := rules.SaveState(cacheDir, ex.TenantID, rules.CacheState{RulesVersion: res.RulesVersion, ManifestSHA: res.ManifestSHA, ArchivePath: p}); err != nil {
@@ -93,7 +99,13 @@ func RunUpdateRules(ctx context.Context, opts UpdateRulesOptions) error {
 	if err != nil {
 		return err
 	}
-	if err := rules.VerifySignatureOpenSSL(cacheDir, res.SignatureBase64, p); err != nil {
+	if err := rules.VerifyArchiveSignatureWithBundledKeyOpenSSL(
+		cacheDir,
+		p,
+		res.SignatureBase64,
+		res.SigningPublicKeyPathInArchive,
+		res.SigningPublicKeySignatureBase64,
+	); err != nil {
 		return err
 	}
 	if err := rules.SaveState(cacheDir, ex.TenantID, rules.CacheState{RulesVersion: res.RulesVersion, ManifestSHA: res.ManifestSHA, ArchivePath: p}); err != nil {

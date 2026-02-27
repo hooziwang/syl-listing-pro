@@ -7,13 +7,16 @@ type ExchangeResp struct {
 }
 
 type RulesResolveResp struct {
-	UpToDate        bool   `json:"up_to_date"`
-	RulesVersion    string `json:"rules_version"`
-	ManifestSHA     string `json:"manifest_sha256"`
-	DownloadURL     string `json:"download_url"`
-	SignatureBase64 string `json:"signature_base64,omitempty"`
-	SignatureURL    string `json:"signature_url,omitempty"`
-	SignatureAlgo   string `json:"signature_algo,omitempty"`
+	UpToDate                        bool   `json:"up_to_date"`
+	RulesVersion                    string `json:"rules_version"`
+	ManifestSHA                     string `json:"manifest_sha256"`
+	DownloadURL                     string `json:"download_url"`
+	SignatureBase64                 string `json:"signature_base64,omitempty"`
+	SignatureURL                    string `json:"signature_url,omitempty"`
+	SignatureAlgo                   string `json:"signature_algo,omitempty"`
+	SigningPublicKeyPathInArchive   string `json:"signing_public_key_path_in_archive,omitempty"`
+	SigningPublicKeySignatureBase64 string `json:"signing_public_key_signature_base64,omitempty"`
+	SigningPublicKeySignatureAlgo   string `json:"signing_public_key_signature_algo,omitempty"`
 }
 
 type GenerateReq struct {
