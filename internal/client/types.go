@@ -21,6 +21,7 @@ type RulesResolveResp struct {
 
 type GenerateReq struct {
 	InputMarkdown  string `json:"input_markdown"`
+	InputFilename  string `json:"input_filename,omitempty"`
 	CandidateCount int    `json:"candidate_count,omitempty"`
 }
 

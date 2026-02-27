@@ -322,7 +322,11 @@ func runGenerateTask(
 	tenantForLog := ex.TenantID
 	var elapsedForLog int64
 
-	resp, err := api.Generate(ctx, ex.AccessToken, client.GenerateReq{InputMarkdown: task.file.Content, CandidateCount: 1})
+	resp, err := api.Generate(ctx, ex.AccessToken, client.GenerateReq{
+		InputMarkdown:  task.file.Content,
+		InputFilename:  filepath.Base(task.file.Path),
+		CandidateCount: 1,
+	})
 	if err != nil {
 		if isContextCanceledErr(err) {
 			log.Info(fmt.Sprintf("%s 已取消", taskPrefix(tenantForLog, elapsedForLog, task.label)))
