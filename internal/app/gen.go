@@ -538,6 +538,23 @@ func renderWorkerTraceLine(item client.JobTraceItem, colorizeLabel bool) string 
 			return fmt.Sprintf("%s完成%s", sectionLabel(item.Payload, colorizeLabel), tailDuration(item.Payload, "duration_ms", colorizeLabel))
 		}
 		return fmt.Sprintf("%s已生成%s", sectionLabel(item.Payload, colorizeLabel), tailDuration(item.Payload, "duration_ms", colorizeLabel))
+	case "section_sentence_step_ok":
+		label := sectionLabel(item.Payload, colorizeLabel)
+		idx := intPayload(item.Payload, "sentence_index")
+		total := intPayload(item.Payload, "sentence_total")
+		if idx > 0 && total > 0 {
+			return fmt.Sprintf("%s逐句生成（第%d/%d句）完成%s", label, idx, total, tailDuration(item.Payload, "duration_ms", colorizeLabel))
+		}
+		return fmt.Sprintf("%s逐句生成完成%s", label, tailDuration(item.Payload, "duration_ms", colorizeLabel))
+	case "section_sentence_step_validate_fail":
+		label := sectionLabel(item.Payload, colorizeLabel)
+		idx := intPayload(item.Payload, "sentence_index")
+		total := intPayload(item.Payload, "sentence_total")
+		errText := shortText(stringPayload(item.Payload, "error"), 140)
+		if idx > 0 && total > 0 {
+			return fmt.Sprintf("%s逐句校验失败（第%d/%d句）：%s", label, idx, total, errText)
+		}
+		return fmt.Sprintf("%s逐句校验失败：%s", label, errText)
 	case "api_request":
 		// 底层 LLM 调用事件不在普通输出展示；可通过 --verbose 查看 NDJSON 细节。
 		return ""
