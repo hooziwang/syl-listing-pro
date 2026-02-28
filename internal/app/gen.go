@@ -445,13 +445,13 @@ func runGenerateTask(
 			log.Info(fmt.Sprintf("%s CN 已写入：%s", taskPrefix(tenantForLog, elapsedForLog, task.label), mustAbsPath(cnPath)))
 
 			enDocxTargetPath := strings.TrimSuffix(enPath, filepath.Ext(enPath)) + ".docx"
-			enDocxPath, err := convertMarkdownToDocxFunc(ctx, enPath, enDocxTargetPath, resData.Meta.HighlightWordsEN)
+			enDocxPath, err := convertMarkdownToDocxFunc(ctx, enPath, enDocxTargetPath)
 			if err != nil {
 				log.Info(fmt.Sprintf("%s 生成失败：EN Word 转换失败: %v", taskPrefix(tenantForLog, elapsedForLog, task.label), err))
 				return false
 			}
 			cnDocxTargetPath := strings.TrimSuffix(cnPath, filepath.Ext(cnPath)) + ".docx"
-			cnDocxPath, err := convertMarkdownToDocxFunc(ctx, cnPath, cnDocxTargetPath, resData.Meta.HighlightWordsCN)
+			cnDocxPath, err := convertMarkdownToDocxFunc(ctx, cnPath, cnDocxTargetPath)
 			if err != nil {
 				log.Info(fmt.Sprintf("%s 生成失败：CN Word 转换失败: %v", taskPrefix(tenantForLog, elapsedForLog, task.label), err))
 				return false

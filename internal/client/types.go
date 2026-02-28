@@ -50,10 +50,6 @@ type ResultResp struct {
 	CNMarkdown       string   `json:"cn_markdown"`
 	ValidationReport []string `json:"validation_report"`
 	TimingMS         int64    `json:"timing_ms"`
-	Meta             struct {
-		HighlightWordsEN []string `json:"highlight_words_en"`
-		HighlightWordsCN []string `json:"highlight_words_cn"`
-	} `json:"meta"`
 }
 
 type JobTraceItem struct {

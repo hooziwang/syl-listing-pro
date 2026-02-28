@@ -9,7 +9,7 @@ import (
 func stubDocxConverter(t *testing.T) {
 	t.Helper()
 	old := convertMarkdownToDocxFunc
-	convertMarkdownToDocxFunc = func(_ context.Context, _ string, outputPath string, _ []string) (string, error) {
+	convertMarkdownToDocxFunc = func(_ context.Context, _ string, outputPath string) (string, error) {
 		if abs, err := filepath.Abs(outputPath); err == nil {
 			return abs, nil
 		}

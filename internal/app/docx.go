@@ -20,16 +20,12 @@ type md2docSummaryLine struct {
 	} `json:"details"`
 }
 
-func ConvertMarkdownToDocx(ctx context.Context, markdownPath string, outputPath string, highlightWords []string) (string, error) {
+func ConvertMarkdownToDocx(ctx context.Context, markdownPath string, outputPath string) (string, error) {
 	targetPath := outputPath
 	if abs, err := filepath.Abs(outputPath); err == nil {
 		targetPath = abs
 	}
 	args := []string{markdownPath, "--output", targetPath}
-	words := dedupeWords(highlightWords)
-	if len(words) > 0 {
-		args = append(args, "--highlight-words", strings.Join(words, ","))
-	}
 
 	cmd := exec.CommandContext(ctx, "syl-md2doc", args...)
 	out, err := cmd.CombinedOutput()
@@ -76,22 +72,4 @@ func parseMD2DocOutputPath(raw []byte) string {
 		}
 	}
 	return ""
-}
-
-func dedupeWords(words []string) []string {
-	seen := map[string]struct{}{}
-	out := make([]string, 0, len(words))
-	for _, raw := range words {
-		w := strings.TrimSpace(raw)
-		if w == "" {
-			continue
-		}
-		key := strings.ToLower(w)
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		out = append(out, w)
-	}
-	return out
 }

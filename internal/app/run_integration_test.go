@@ -328,7 +328,7 @@ func TestRunUpdateRules_UpToDate(t *testing.T) {
 	}
 }
 
-func TestRunGen_PassesHighlightWordsToDocxConverter(t *testing.T) {
+func TestRunGen_CallsDocxConverterWithoutHighlightWords(t *testing.T) {
 	home := t.TempDir()
 	cacheHome := t.TempDir()
 	t.Setenv("HOME", home)
@@ -347,14 +347,11 @@ func TestRunGen_PassesHighlightWordsToDocxConverter(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	type call struct {
-		mdPath string
-		words  []string
-	}
+	type call struct{ mdPath string }
 	var calls []call
 	oldConvert := convertMarkdownToDocxFunc
-	convertMarkdownToDocxFunc = func(_ context.Context, markdownPath string, outputPath string, highlightWords []string) (string, error) {
-		calls = append(calls, call{mdPath: markdownPath, words: append([]string(nil), highlightWords...)})
+	convertMarkdownToDocxFunc = func(_ context.Context, markdownPath string, outputPath string) (string, error) {
+		calls = append(calls, call{mdPath: markdownPath})
 		return outputPath, nil
 	}
 	defer func() { convertMarkdownToDocxFunc = oldConvert }()
@@ -372,7 +369,7 @@ func TestRunGen_PassesHighlightWordsToDocxConverter(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job_meta":
 			_, _ = io.WriteString(w, `{"job_id":"job_meta","status":"succeeded"}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job_meta/result":
-			_, _ = io.WriteString(w, `{"en_markdown":"# EN","cn_markdown":"# CN","meta":{"highlight_words_en":["A","B"],"highlight_words_cn":["甲","乙"]}}`)
+			_, _ = io.WriteString(w, `{"en_markdown":"# EN","cn_markdown":"# CN"}`)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -398,20 +395,11 @@ func TestRunGen_PassesHighlightWordsToDocxConverter(t *testing.T) {
 	if len(calls) != 2 {
 		t.Fatalf("convert calls=%d want=2", len(calls))
 	}
-	if strings.HasSuffix(calls[0].mdPath, "_en.md") {
-		if got := strings.Join(calls[0].words, ","); got != "A,B" {
-			t.Fatalf("en words=%s", got)
-		}
-		if got := strings.Join(calls[1].words, ","); got != "甲,乙" {
-			t.Fatalf("cn words=%s", got)
-		}
-	} else {
-		if got := strings.Join(calls[0].words, ","); got != "甲,乙" {
-			t.Fatalf("cn words=%s", got)
-		}
-		if got := strings.Join(calls[1].words, ","); got != "A,B" {
-			t.Fatalf("en words=%s", got)
-		}
+	if !(strings.HasSuffix(calls[0].mdPath, "_en.md") || strings.HasSuffix(calls[1].mdPath, "_en.md")) {
+		t.Fatalf("missing en docx conversion call: %+v", calls)
+	}
+	if !(strings.HasSuffix(calls[0].mdPath, "_cn.md") || strings.HasSuffix(calls[1].mdPath, "_cn.md")) {
+		t.Fatalf("missing cn docx conversion call: %+v", calls)
 	}
 }
 

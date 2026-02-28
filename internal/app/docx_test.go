@@ -49,7 +49,7 @@ func TestConvertMarkdownToDocx_Success(t *testing.T) {
 		t.Fatal(err)
 	}
 	outPath := filepath.Join(tmp, "out", "in.docx")
-	path, err := ConvertMarkdownToDocx(context.Background(), md, outPath, []string{"Paper", "paper", " Lanterns "})
+	path, err := ConvertMarkdownToDocx(context.Background(), md, outPath)
 	if err != nil {
 		t.Fatalf("ConvertMarkdownToDocx error: %v", err)
 	}
@@ -63,8 +63,8 @@ func TestConvertMarkdownToDocx_Success(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(argText), "--highlight-words Paper,Lanterns") {
-		t.Fatalf("highlight args unexpected: %s", string(argText))
+	if strings.Contains(string(argText), "--highlight-words") {
+		t.Fatalf("unexpected highlight args: %s", string(argText))
 	}
 }
 
@@ -83,7 +83,7 @@ func TestConvertMarkdownToDocx_Failure(t *testing.T) {
 
 	md := filepath.Join(tmp, "in.md")
 	_ = os.WriteFile(md, []byte("# x\n"), 0o644)
-	_, err := ConvertMarkdownToDocx(context.Background(), md, filepath.Join(tmp, "in.docx"), nil)
+	_, err := ConvertMarkdownToDocx(context.Background(), md, filepath.Join(tmp, "in.docx"))
 	if err == nil || !strings.Contains(err.Error(), "syl-md2doc 执行失败") {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestConvertMarkdownToDocx_RenameFromSummaryPath(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	got, err := ConvertMarkdownToDocx(context.Background(), md, target, nil)
+	got, err := ConvertMarkdownToDocx(context.Background(), md, target)
 	if err != nil {
 		t.Fatalf("ConvertMarkdownToDocx error: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestConvertMarkdownToDocx_NoOutputPathAndMissingTarget(t *testing.T) {
 
 	md := filepath.Join(tmp, "in.md")
 	_ = os.WriteFile(md, []byte("# x\n"), 0o644)
-	_, err := ConvertMarkdownToDocx(context.Background(), md, filepath.Join(tmp, "no", "out.docx"), nil)
+	_, err := ConvertMarkdownToDocx(context.Background(), md, filepath.Join(tmp, "no", "out.docx"))
 	if err == nil || !strings.Contains(err.Error(), "未返回输出路径") {
 		t.Fatalf("unexpected err: %v", err)
 	}
