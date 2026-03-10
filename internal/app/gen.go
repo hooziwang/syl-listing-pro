@@ -90,6 +90,8 @@ func RunGen(ctx context.Context, opts GenOptions) error {
 		return err
 	}
 	defer func() { _ = log.Close() }()
+	runDone := make(chan struct{})
+	defer close(runDone)
 	startAll := time.Now()
 
 	api := client.New(workerBaseURL)
@@ -221,9 +223,13 @@ func RunGen(ctx context.Context, opts GenOptions) error {
 	}
 
 	go func() {
-		<-ctx.Done()
-		if errors.Is(ctx.Err(), context.Canceled) {
-			cancelSubmittedTasks()
+		select {
+		case <-ctx.Done():
+			if errors.Is(ctx.Err(), context.Canceled) {
+				cancelSubmittedTasks()
+			}
+		case <-runDone:
+			return
 		}
 	}()
 

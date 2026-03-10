@@ -311,3 +311,57 @@ func TestRunGen_ContextCancelWithQueuedTasks(t *testing.T) {
 		t.Fatalf("RunGen should return quickly on cancel")
 	}
 }
+
+func TestRunGen_SuccessDoesNotEmitInterruptCleanupAfterReturn(t *testing.T) {
+	stubDocxConverter(t)
+	prepareRunGenCachedRules(t, "#MARK")
+	ts := newRunGenFastSuccessServer(t)
+	defer ts.Close()
+
+	oldBase := workerBaseURL
+	oldPollMs := pollIntervalMs
+	oldPollTimeout := pollTimeoutSecond
+	oldMax := maxConcurrentTasks
+	workerBaseURL = ts.URL
+	pollIntervalMs = 1
+	pollTimeoutSecond = 5
+	maxConcurrentTasks = 16
+	defer func() {
+		workerBaseURL = oldBase
+		pollIntervalMs = oldPollMs
+		pollTimeoutSecond = oldPollTimeout
+		maxConcurrentTasks = oldMax
+	}()
+
+	input := filepath.Join(t.TempDir(), "one.md")
+	if err := os.WriteFile(input, []byte("#MARK\ncontent"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	done := make(chan string, 1)
+	go func() {
+		b, _ := io.ReadAll(r)
+		done <- string(b)
+	}()
+
+	runErr := RunGen(ctx, GenOptions{OutputDir: t.TempDir(), Inputs: []string{input}})
+	cancel()
+	time.Sleep(50 * time.Millisecond)
+	_ = w.Close()
+	os.Stdout = oldStdout
+	out := <-done
+
+	if runErr != nil {
+		t.Fatalf("RunGen error: %v", runErr)
+	}
+	if strings.Contains(out, "检测到中断，开始取消已提交任务") {
+		t.Fatalf("unexpected interrupt cleanup log after success: %s", out)
+	}
+}
