@@ -94,7 +94,7 @@ func RunGen(ctx context.Context, opts GenOptions) error {
 	defer close(runDone)
 	startAll := time.Now()
 
-	api := client.New(workerBaseURL)
+	api := client.New(resolveWorkerBaseURL())
 	api.SetTrace(func(ev client.TraceEvent) {
 		if shouldSkipVerboseHTTPTrace(opts.Verbose, ev) {
 			return

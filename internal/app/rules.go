@@ -28,7 +28,7 @@ func RunUpdateRules(ctx context.Context, opts UpdateRulesOptions) error {
 	if err != nil {
 		return err
 	}
-	api := client.New(workerBaseURL)
+	api := client.New(resolveWorkerBaseURL())
 	api.SetTrace(func(ev client.TraceEvent) {
 		log.Event("worker_http_"+ev.Stage, map[string]any{
 			"method":      ev.Method,

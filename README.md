@@ -17,6 +17,12 @@
 - 规则自动同步：每次运行自动检查规则更新
 - 输出友好：默认人类可读进度；`--verbose` 输出 NDJSON（机器友好）
 
+## 契约说明
+
+- 跨仓规则契约、worker API 和 `e2e` 验收矩阵见 [docs/contract-matrix.md](/Users/wxy/syl-listing-pro/docs/contract-matrix.md)。
+- CLI 真实生成链路继续由 `release-gate` 验收。
+- 配置解耦、worker 地址透传等工程侧改动由 `architecture-gate` 纳入验收。
+
 ## 安装
 
 ### macOS（Homebrew）
@@ -190,7 +196,7 @@ syl:00:44 CN Word 已写入：/abs/listing_xxx_cn.docx
 
 说明：
 - 规则对用户默认不可见，不需要手工编辑。
-- CLI 不提供可配置 `base_url`，固定连接服务端。
+- 默认连接服务端可通过环境变量 `SYL_LISTING_WORKER_URL` 覆盖。
 
 ## 常见问题
 
