@@ -19,9 +19,12 @@
 
 ## 契约说明
 
-- 跨仓规则契约、worker API 和 `e2e` 验收矩阵见 [docs/contract-matrix.md](/Users/wxy/syl-listing-pro/docs/contract-matrix.md)。
 - CLI 真实生成链路继续由 `release-gate` 验收。
 - 配置解耦、worker 地址透传等工程侧改动由 `architecture-gate` 纳入验收。
+- 本 README 只维护 CLI 安装、配置和生成用法。
+- 规则包结构、签名与发布入口说明维护在 `rules/README.md`。
+- worker HTTP API、运行态诊断与服务端行为说明维护在 `worker/README.md`。
+- `release-gate`、`architecture-gate` 和工程侧命令入口说明维护在 `syl-listing-pro-x/README.md`。
 
 ## 安装
 
