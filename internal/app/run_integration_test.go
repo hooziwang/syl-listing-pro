@@ -364,6 +364,81 @@ func TestRunGen_SuccessWithSSEEvents(t *testing.T) {
 	}
 }
 
+func TestRunGen_RetryingStatusContinuesUntilSuccess(t *testing.T) {
+	stubDocxConverter(t)
+	home := t.TempDir()
+	cacheHome := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", cacheHome)
+	writeKeyEnvForTest(t, home)
+
+	cacheDir, err := rules.DefaultCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	archiveBytes := makeRulesArchiveBytes(t, "#MARK")
+	archivePath, err := rules.SaveArchive(cacheDir, "demo", "v1", archiveBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rules.SaveState(cacheDir, "demo", rules.CacheState{RulesVersion: "v1", ManifestSHA: "sha", ArchivePath: archivePath}); err != nil {
+		t.Fatal(err)
+	}
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/auth/exchange":
+			_, _ = io.WriteString(w, `{"access_token":"at","tenant_id":"demo","expires_in":3600}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/rules/resolve":
+			_, _ = io.WriteString(w, `{"up_to_date":true,"rules_version":"v1"}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/generate":
+			_, _ = io.WriteString(w, `{"job_id":"job_retry","status":"queued"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job_retry/events":
+			writeSSETrace(t, w, 1, `{"job_id":"job_retry","tenant_id":"demo","offset":1,"item":{"source":"generation","event":"generate_queued","tenant_id":"demo","job_id":"job_retry","elapsed_ms":0,"payload":{}}}`)
+			writeSSEEvent(t, w, "status", `{"job_id":"job_retry","tenant_id":"demo","status":"retrying","updated_at":"2026-03-12T00:00:01Z"}`)
+			writeSSETrace(t, w, 2, `{"job_id":"job_retry","tenant_id":"demo","offset":2,"item":{"source":"runner","event":"job_retry_scheduled","tenant_id":"demo","job_id":"job_retry","elapsed_ms":1000,"payload":{"attempt":1,"max_attempts":3,"next_attempt":2,"error":"temporary upstream timeout"}}}`)
+			writeSSEEvent(t, w, "status", `{"job_id":"job_retry","tenant_id":"demo","status":"succeeded","updated_at":"2026-03-12T00:00:05Z"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job_retry/result":
+			_, _ = io.WriteString(w, `{"en_markdown":"# EN","cn_markdown":"# CN"}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+
+	oldBase := workerBaseURL
+	oldTimeout := streamTimeoutSecond
+	workerBaseURL = ts.URL
+	streamTimeoutSecond = 5
+	defer func() {
+		workerBaseURL = oldBase
+		streamTimeoutSecond = oldTimeout
+	}()
+
+	outDir := t.TempDir()
+	inputPath := filepath.Join(t.TempDir(), "retry.md")
+	if err := os.WriteFile(inputPath, []byte("#MARK\n\nhello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := captureStdoutRun(t, func() error {
+		return RunGen(context.Background(), GenOptions{
+			Inputs:    []string{inputPath},
+			OutputDir: outDir,
+			Num:       1,
+		})
+	})
+	if err != nil {
+		t.Fatalf("Run error: %v\nout=%s", err, out)
+	}
+	if !strings.Contains(out, "任务重试计划：第 1/3 次失败，准备第 2 次") {
+		t.Fatalf("stdout missing retry trace output: %s", out)
+	}
+	if !strings.Contains(out, "任务完成：成功 1，失败 0") {
+		t.Fatalf("stdout missing success summary: %s", out)
+	}
+}
+
 func TestRunUpdateRules_UpToDate(t *testing.T) {
 	home := t.TempDir()
 	cacheHome := t.TempDir()

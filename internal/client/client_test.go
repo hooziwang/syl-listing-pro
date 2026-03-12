@@ -251,7 +251,7 @@ func TestJobEvents(t *testing.T) {
 			_, _ = io.WriteString(w, "data: {\"job_id\":\"j1\",\"tenant_id\":\"demo\",\"offset\":1,\"item\":{\"ts\":\"2026-03-12T00:00:00Z\",\"source\":\"generation\",\"event\":\"rules_loaded\",\"tenant_id\":\"demo\",\"job_id\":\"j1\",\"elapsed_ms\":10,\"payload\":{\"rules_version\":\"v1\"}}}\n\n")
 			flusher.Flush()
 			_, _ = io.WriteString(w, "event: status\n")
-			_, _ = io.WriteString(w, "data: {\"job_id\":\"j1\",\"tenant_id\":\"demo\",\"status\":\"running\",\"updated_at\":\"2026-03-12T00:00:01Z\"}\n\n")
+			_, _ = io.WriteString(w, "data: {\"job_id\":\"j1\",\"tenant_id\":\"demo\",\"status\":\"retrying\",\"updated_at\":\"2026-03-12T00:00:01Z\"}\n\n")
 			flusher.Flush()
 			_, _ = io.WriteString(w, "event: status\n")
 			_, _ = io.WriteString(w, "data: {\"job_id\":\"j1\",\"tenant_id\":\"demo\",\"status\":\"succeeded\",\"updated_at\":\"2026-03-12T00:00:02Z\"}\n\n")
@@ -279,7 +279,7 @@ func TestJobEvents(t *testing.T) {
 	if events[0].Type != "trace" || events[0].Trace == nil || events[0].Trace.Item.Event != "rules_loaded" {
 		t.Fatalf("first event=%+v", events[0])
 	}
-	if events[1].Type != "status" || events[1].Status == nil || events[1].Status.Status != "running" {
+	if events[1].Type != "status" || events[1].Status == nil || events[1].Status.Status != "retrying" {
 		t.Fatalf("second event=%+v", events[1])
 	}
 	if events[2].Type != "status" || events[2].Status == nil || events[2].Status.Status != "succeeded" {
