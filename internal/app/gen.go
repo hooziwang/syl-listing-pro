@@ -509,6 +509,9 @@ func shouldSkipVerboseHTTPTrace(verbose bool, ev client.TraceEvent) bool {
 }
 
 func shouldSkipVerboseWorkerTrace(item client.JobTraceItem) bool {
+	if item.Event == "agent_team_candidate_failed" {
+		return true
+	}
 	if item.Source != "api" {
 		return false
 	}
@@ -569,6 +572,8 @@ func renderWorkerTraceLine(item client.JobTraceItem, colorizeLabel bool) string 
 	case "api_retry":
 		return ""
 	case "api_failed":
+		return ""
+	case "agent_team_candidate_failed":
 		return ""
 	case "job_retry_scheduled":
 		return fmt.Sprintf("任务重试计划：第 %d/%d 次失败，准备第 %d 次（等待由队列退避控制）：%s",
