@@ -171,13 +171,6 @@ func TestAPIEndpointsAndTrace(t *testing.T) {
 			b, _ := io.ReadAll(r.Body)
 			gotGenerateBody = string(b)
 			_, _ = io.WriteString(w, `{"job_id":"j1","status":"queued"}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/j1":
-			_, _ = io.WriteString(w, `{"job_id":"j1","status":"succeeded"}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/j1/trace":
-			if r.URL.Query().Get("offset") != "1" || r.URL.Query().Get("limit") != "2" {
-				t.Fatalf("offset/limit query missing")
-			}
-			_, _ = io.WriteString(w, `{"ok":true,"job_id":"j1","job_status":"running","tenant_id":"demo","trace_count":1,"limit":2,"offset":1,"next_offset":2,"has_more":false,"items":[]}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/j1/result":
 			_, _ = io.WriteString(w, `{"en_markdown":"en","cn_markdown":"cn"}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/download":
@@ -217,14 +210,6 @@ func TestAPIEndpointsAndTrace(t *testing.T) {
 		t.Fatalf("generate body invalid: %s err=%v", gotGenerateBody, err)
 	}
 
-	jobResp, err := api.Job(context.Background(), "at", "j1")
-	if err != nil || jobResp.Status != "succeeded" {
-		t.Fatalf("Job got=%+v err=%v", jobResp, err)
-	}
-	_, err = api.JobTrace(context.Background(), "at", "j1", 1, 2)
-	if err != nil {
-		t.Fatalf("JobTrace err=%v", err)
-	}
 	res, err := api.Result(context.Background(), "at", "j1")
 	if err != nil || res.ENMarkdown != "en" || res.CNMarkdown != "cn" {
 		t.Fatalf("Result got=%+v err=%v", res, err)
@@ -241,6 +226,64 @@ func TestAPIEndpointsAndTrace(t *testing.T) {
 	}
 	if len(traces) == 0 {
 		t.Fatal("expected trace events")
+	}
+}
+
+func TestJobEvents(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/j1/events":
+			if got := r.Header.Get("Authorization"); got != "Bearer at" {
+				t.Fatalf("authorization=%q", got)
+			}
+			if got := r.Header.Get("Accept"); got != "text/event-stream" {
+				t.Fatalf("accept=%q", got)
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Cache-Control", "no-cache")
+			flusher, ok := w.(http.Flusher)
+			if !ok {
+				t.Fatal("response writer does not support flushing")
+			}
+			_, _ = io.WriteString(w, ": ping\n\n")
+			_, _ = io.WriteString(w, "event: trace\n")
+			_, _ = io.WriteString(w, "id: 1\n")
+			_, _ = io.WriteString(w, "data: {\"job_id\":\"j1\",\"tenant_id\":\"demo\",\"offset\":1,\"item\":{\"ts\":\"2026-03-12T00:00:00Z\",\"source\":\"generation\",\"event\":\"rules_loaded\",\"tenant_id\":\"demo\",\"job_id\":\"j1\",\"elapsed_ms\":10,\"payload\":{\"rules_version\":\"v1\"}}}\n\n")
+			flusher.Flush()
+			_, _ = io.WriteString(w, "event: status\n")
+			_, _ = io.WriteString(w, "data: {\"job_id\":\"j1\",\"tenant_id\":\"demo\",\"status\":\"running\",\"updated_at\":\"2026-03-12T00:00:01Z\"}\n\n")
+			flusher.Flush()
+			_, _ = io.WriteString(w, "event: status\n")
+			_, _ = io.WriteString(w, "data: {\"job_id\":\"j1\",\"tenant_id\":\"demo\",\"status\":\"succeeded\",\"updated_at\":\"2026-03-12T00:00:02Z\"}\n\n")
+			flusher.Flush()
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+
+	api := New(ts.URL)
+	var events []JobEvent
+	status, err := api.JobEvents(context.Background(), "at", "j1", func(ev JobEvent) {
+		events = append(events, ev)
+	})
+	if err != nil {
+		t.Fatalf("JobEvents error: %v", err)
+	}
+	if status.JobID != "j1" || status.Status != "succeeded" {
+		t.Fatalf("status=%+v", status)
+	}
+	if len(events) != 3 {
+		t.Fatalf("events=%d want=3", len(events))
+	}
+	if events[0].Type != "trace" || events[0].Trace == nil || events[0].Trace.Item.Event != "rules_loaded" {
+		t.Fatalf("first event=%+v", events[0])
+	}
+	if events[1].Type != "status" || events[1].Status == nil || events[1].Status.Status != "running" {
+		t.Fatalf("second event=%+v", events[1])
+	}
+	if events[2].Type != "status" || events[2].Status == nil || events[2].Status.Status != "succeeded" {
+		t.Fatalf("third event=%+v", events[2])
 	}
 }
 

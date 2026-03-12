@@ -345,139 +345,136 @@ func runGenerateTask(
 		onJobSubmitted(resp.JobID)
 	}
 
-	traceOffset := 0
 	traceWarned := false
 	lastTraceLine := ""
-	drainTrace := func() {
-		for i := 0; i < 3; i++ {
-			tr, trErr := api.JobTrace(ctx, ex.AccessToken, resp.JobID, traceOffset, 300)
-			if trErr != nil {
-				if opts.Verbose {
-					log.Event("worker_trace_error", map[string]any{
-						"job_id": resp.JobID,
-						"error":  trErr.Error(),
-						"task":   task.label,
-					})
-				} else if !traceWarned {
-					traceWarned = true
-					log.Info(fmt.Sprintf("%s 过程拉取失败，继续执行：%v", taskPrefix(tenantForLog, elapsedForLog, task.label), trErr))
-				}
+	streamCtx, cancelStream := context.WithTimeout(ctx, time.Duration(streamTimeoutSecond)*time.Second)
+	defer cancelStream()
+
+	handleTraceItem := func(item client.JobTraceItem) {
+		if strings.TrimSpace(item.TenantID) != "" {
+			tenantForLog = item.TenantID
+		}
+		if item.ElapsedMS >= 0 {
+			elapsedForLog = item.ElapsedMS
+		}
+		if opts.Verbose {
+			if shouldSkipVerboseWorkerTrace(item) {
+				return
+			}
+			log.Event("worker_trace", map[string]any{
+				"job_id":     item.JobID,
+				"tenant_id":  item.TenantID,
+				"ts":         item.TS,
+				"elapsed_ms": item.ElapsedMS,
+				"source":     item.Source,
+				"event_name": item.Event,
+				"level":      item.Level,
+				"req_id":     item.ReqID,
+				"payload":    item.Payload,
+				"task":       task.label,
+			})
+		}
+		msg := renderWorkerTraceLine(item, !opts.Verbose)
+		if strings.TrimSpace(msg) == "" {
+			return
+		}
+		if !opts.Verbose {
+			if msg == lastTraceLine {
+				return
+			}
+			lastTraceLine = msg
+		}
+		log.Info(fmt.Sprintf("%s %s", taskPrefix(tenantForLog, elapsedForLog, task.label), msg))
+	}
+
+	stResp, err := api.JobEvents(streamCtx, ex.AccessToken, resp.JobID, func(ev client.JobEvent) {
+		switch ev.Type {
+		case "trace":
+			if ev.Trace == nil {
 				return
 			}
 			traceWarned = false
-			if len(tr.Items) == 0 {
-				traceOffset = tr.NextOffset
+			handleTraceItem(ev.Trace.Item)
+		case "status":
+			if ev.Status == nil {
 				return
 			}
-			traceOffset = tr.NextOffset
-			for _, item := range tr.Items {
-				if strings.TrimSpace(item.TenantID) != "" {
-					tenantForLog = item.TenantID
-				}
-				if item.ElapsedMS >= 0 {
-					elapsedForLog = item.ElapsedMS
-				}
-				if opts.Verbose {
-					if shouldSkipVerboseWorkerTrace(item) {
-						continue
-					}
-					log.Event("worker_trace", map[string]any{
-						"job_id":     item.JobID,
-						"tenant_id":  item.TenantID,
-						"ts":         item.TS,
-						"elapsed_ms": item.ElapsedMS,
-						"source":     item.Source,
-						"event_name": item.Event,
-						"level":      item.Level,
-						"req_id":     item.ReqID,
-						"payload":    item.Payload,
-						"task":       task.label,
-					})
-				}
-				msg := renderWorkerTraceLine(item, !opts.Verbose)
-				if strings.TrimSpace(msg) != "" {
-					if !opts.Verbose {
-						if msg == lastTraceLine {
-							continue
-						}
-						lastTraceLine = msg
-					}
-					log.Info(fmt.Sprintf("%s %s", taskPrefix(tenantForLog, elapsedForLog, task.label), msg))
-				}
-			}
-			if !tr.HasMore {
-				return
+			if strings.TrimSpace(ev.Status.TenantID) != "" {
+				tenantForLog = ev.Status.TenantID
 			}
 		}
-	}
-
-	deadline := time.Now().Add(time.Duration(pollTimeoutSecond) * time.Second)
-	for {
-		drainTrace()
-		if time.Now().After(deadline) {
-			log.Info(fmt.Sprintf("%s 生成失败：轮询超时", taskPrefix(tenantForLog, elapsedForLog, task.label)))
+	})
+	if err != nil {
+		if isContextCanceledErr(err) {
+			log.Info(fmt.Sprintf("%s 已取消", taskPrefix(tenantForLog, elapsedForLog, task.label)))
 			return false
 		}
-		stResp, err := api.Job(ctx, ex.AccessToken, resp.JobID)
+		if errors.Is(err, context.DeadlineExceeded) {
+			log.Info(fmt.Sprintf("%s 生成失败：SSE 超时", taskPrefix(tenantForLog, elapsedForLog, task.label)))
+			return false
+		}
+		if opts.Verbose {
+			log.Event("worker_trace_error", map[string]any{
+				"job_id": resp.JobID,
+				"error":  err.Error(),
+				"task":   task.label,
+			})
+		} else if !traceWarned {
+			traceWarned = true
+			log.Info(fmt.Sprintf("%s 过程流式接收失败：%v", taskPrefix(tenantForLog, elapsedForLog, task.label), err))
+		}
+		log.Info(fmt.Sprintf("%s 生成失败：%v", taskPrefix(tenantForLog, elapsedForLog, task.label), err))
+		return false
+	}
+
+	if stResp.Status == "succeeded" {
+		resData, err := api.Result(ctx, ex.AccessToken, resp.JobID)
 		if err != nil {
-			if isContextCanceledErr(err) {
-				log.Info(fmt.Sprintf("%s 已取消", taskPrefix(tenantForLog, elapsedForLog, task.label)))
-				return false
-			}
-			log.Info(fmt.Sprintf("%s 生成失败：%v", taskPrefix(tenantForLog, elapsedForLog, task.label), err))
+			log.Info(fmt.Sprintf("%s 生成失败：读取结果失败: %v", taskPrefix(tenantForLog, elapsedForLog, task.label), err))
 			return false
 		}
-		if stResp.Status == "succeeded" {
-			drainTrace()
-			resData, err := api.Result(ctx, ex.AccessToken, resp.JobID)
-			if err != nil {
-				log.Info(fmt.Sprintf("%s 生成失败：读取结果失败: %v", taskPrefix(tenantForLog, elapsedForLog, task.label), err))
-				return false
-			}
-			_, enPath, cnPath, err := output.UniquePair(opts.OutputDir, task.file.Path)
-			if err != nil {
-				log.Info(fmt.Sprintf("%s 生成失败：输出文件名失败: %v", taskPrefix(tenantForLog, elapsedForLog, task.label), err))
-				return false
-			}
-			if err := os.WriteFile(enPath, []byte(resData.ENMarkdown), 0o644); err != nil {
-				log.Info(fmt.Sprintf("%s 生成失败：写 EN 失败: %v", taskPrefix(tenantForLog, elapsedForLog, task.label), err))
-				return false
-			}
-			if err := os.WriteFile(cnPath, []byte(resData.CNMarkdown), 0o644); err != nil {
-				log.Info(fmt.Sprintf("%s 生成失败：写 CN 失败: %v", taskPrefix(tenantForLog, elapsedForLog, task.label), err))
-				return false
-			}
-			log.Info(fmt.Sprintf("%s EN 已写入：%s", taskPrefix(tenantForLog, elapsedForLog, task.label), mustAbsPath(enPath)))
-			log.Info(fmt.Sprintf("%s CN 已写入：%s", taskPrefix(tenantForLog, elapsedForLog, task.label), mustAbsPath(cnPath)))
+		_, enPath, cnPath, err := output.UniquePair(opts.OutputDir, task.file.Path)
+		if err != nil {
+			log.Info(fmt.Sprintf("%s 生成失败：输出文件名失败: %v", taskPrefix(tenantForLog, elapsedForLog, task.label), err))
+			return false
+		}
+		if err := os.WriteFile(enPath, []byte(resData.ENMarkdown), 0o644); err != nil {
+			log.Info(fmt.Sprintf("%s 生成失败：写 EN 失败: %v", taskPrefix(tenantForLog, elapsedForLog, task.label), err))
+			return false
+		}
+		if err := os.WriteFile(cnPath, []byte(resData.CNMarkdown), 0o644); err != nil {
+			log.Info(fmt.Sprintf("%s 生成失败：写 CN 失败: %v", taskPrefix(tenantForLog, elapsedForLog, task.label), err))
+			return false
+		}
+		log.Info(fmt.Sprintf("%s EN 已写入：%s", taskPrefix(tenantForLog, elapsedForLog, task.label), mustAbsPath(enPath)))
+		log.Info(fmt.Sprintf("%s CN 已写入：%s", taskPrefix(tenantForLog, elapsedForLog, task.label), mustAbsPath(cnPath)))
 
-			enDocxTargetPath := strings.TrimSuffix(enPath, filepath.Ext(enPath)) + ".docx"
-			enDocxPath, err := convertMarkdownToDocxFunc(ctx, enPath, enDocxTargetPath)
-			if err != nil {
-				log.Info(fmt.Sprintf("%s 生成失败：EN Word 转换失败: %v", taskPrefix(tenantForLog, elapsedForLog, task.label), err))
-				return false
-			}
-			cnDocxTargetPath := strings.TrimSuffix(cnPath, filepath.Ext(cnPath)) + ".docx"
-			cnDocxPath, err := convertMarkdownToDocxFunc(ctx, cnPath, cnDocxTargetPath)
-			if err != nil {
-				log.Info(fmt.Sprintf("%s 生成失败：CN Word 转换失败: %v", taskPrefix(tenantForLog, elapsedForLog, task.label), err))
-				return false
-			}
-			log.Info(fmt.Sprintf("%s EN Word 已写入：%s", taskPrefix(tenantForLog, elapsedForLog, task.label), mustAbsPath(enDocxPath)))
-			log.Info(fmt.Sprintf("%s CN Word 已写入：%s", taskPrefix(tenantForLog, elapsedForLog, task.label), mustAbsPath(cnDocxPath)))
-			return true
-		}
-		if stResp.Status == "failed" {
-			drainTrace()
-			log.Info(fmt.Sprintf("%s 生成失败：%s", taskPrefix(tenantForLog, elapsedForLog, task.label), stResp.Error))
+		enDocxTargetPath := strings.TrimSuffix(enPath, filepath.Ext(enPath)) + ".docx"
+		enDocxPath, err := convertMarkdownToDocxFunc(ctx, enPath, enDocxTargetPath)
+		if err != nil {
+			log.Info(fmt.Sprintf("%s 生成失败：EN Word 转换失败: %v", taskPrefix(tenantForLog, elapsedForLog, task.label), err))
 			return false
 		}
-		if stResp.Status == "cancelled" {
-			drainTrace()
-			log.Info(fmt.Sprintf("%s 生成已取消", taskPrefix(tenantForLog, elapsedForLog, task.label)))
+		cnDocxTargetPath := strings.TrimSuffix(cnPath, filepath.Ext(cnPath)) + ".docx"
+		cnDocxPath, err := convertMarkdownToDocxFunc(ctx, cnPath, cnDocxTargetPath)
+		if err != nil {
+			log.Info(fmt.Sprintf("%s 生成失败：CN Word 转换失败: %v", taskPrefix(tenantForLog, elapsedForLog, task.label), err))
 			return false
 		}
-		time.Sleep(time.Duration(pollIntervalMs) * time.Millisecond)
+		log.Info(fmt.Sprintf("%s EN Word 已写入：%s", taskPrefix(tenantForLog, elapsedForLog, task.label), mustAbsPath(enDocxPath)))
+		log.Info(fmt.Sprintf("%s CN Word 已写入：%s", taskPrefix(tenantForLog, elapsedForLog, task.label), mustAbsPath(cnDocxPath)))
+		return true
 	}
+	if stResp.Status == "failed" {
+		log.Info(fmt.Sprintf("%s 生成失败：%s", taskPrefix(tenantForLog, elapsedForLog, task.label), stResp.Error))
+		return false
+	}
+	if stResp.Status == "cancelled" {
+		log.Info(fmt.Sprintf("%s 生成已取消", taskPrefix(tenantForLog, elapsedForLog, task.label)))
+		return false
+	}
+	log.Info(fmt.Sprintf("%s 生成失败：SSE 未返回终态", taskPrefix(tenantForLog, elapsedForLog, task.label)))
+	return false
 }
 
 func isContextCanceledErr(err error) bool {
@@ -516,7 +513,7 @@ func shouldSkipVerboseWorkerTrace(item client.JobTraceItem) bool {
 		return false
 	}
 	switch item.Event {
-	case "job_status_read", "job_result_not_ready":
+	case "job_result_not_ready":
 		return true
 	default:
 		return false
@@ -526,7 +523,7 @@ func shouldSkipVerboseWorkerTrace(item client.JobTraceItem) bool {
 func renderWorkerTraceLine(item client.JobTraceItem, colorizeLabel bool) string {
 	if item.Source == "api" {
 		switch item.Event {
-		case "job_status_read", "job_result_not_ready":
+		case "job_result_not_ready":
 			return ""
 		}
 	}

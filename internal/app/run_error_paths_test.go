@@ -147,10 +147,8 @@ func TestRunGen_RuntimeFailureBranches(t *testing.T) {
 				_, _ = io.WriteString(w, `{"up_to_date":true,"rules_version":"v1"}`)
 			case r.Method == http.MethodPost && r.URL.Path == "/v1/generate":
 				_, _ = io.WriteString(w, `{"job_id":"job1","status":"queued"}`)
-			case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job1/trace":
-				_, _ = io.WriteString(w, `{"ok":true,"job_id":"job1","job_status":"running","tenant_id":"demo","trace_count":0,"limit":300,"offset":0,"next_offset":0,"has_more":false,"items":[]}`)
-			case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job1":
-				_, _ = io.WriteString(w, `{"job_id":"job1","status":"succeeded"}`)
+			case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job1/events":
+				writeSSEEvent(t, w, "status", `{"job_id":"job1","tenant_id":"demo","status":"succeeded","updated_at":"2026-03-12T00:00:02Z"}`)
 			case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job1/result":
 				w.WriteHeader(http.StatusBadRequest)
 				_, _ = io.WriteString(w, "bad")
@@ -161,12 +159,12 @@ func TestRunGen_RuntimeFailureBranches(t *testing.T) {
 		defer ts.Close()
 
 		oldBase := workerBaseURL
-		oldPoll := pollIntervalMs
+		oldPoll := streamTimeoutSecond
 		workerBaseURL = ts.URL
-		pollIntervalMs = 1
+		streamTimeoutSecond = 1
 		defer func() {
 			workerBaseURL = oldBase
-			pollIntervalMs = oldPoll
+			streamTimeoutSecond = oldPoll
 		}()
 
 		err := RunGen(context.Background(), GenOptions{OutputDir: t.TempDir(), Inputs: []string{inputPath}})
@@ -184,10 +182,8 @@ func TestRunGen_RuntimeFailureBranches(t *testing.T) {
 				_, _ = io.WriteString(w, `{"up_to_date":true,"rules_version":"v1"}`)
 			case r.Method == http.MethodPost && r.URL.Path == "/v1/generate":
 				_, _ = io.WriteString(w, `{"job_id":"job2","status":"queued"}`)
-			case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job2/trace":
-				_, _ = io.WriteString(w, `{"ok":true,"job_id":"job2","job_status":"running","tenant_id":"demo","trace_count":0,"limit":300,"offset":0,"next_offset":0,"has_more":false,"items":[]}`)
-			case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job2":
-				_, _ = io.WriteString(w, `{"job_id":"job2","status":"succeeded"}`)
+			case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job2/events":
+				writeSSEEvent(t, w, "status", `{"job_id":"job2","tenant_id":"demo","status":"succeeded","updated_at":"2026-03-12T00:00:02Z"}`)
 			case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job2/result":
 				_, _ = io.WriteString(w, `{"en_markdown":"EN","cn_markdown":"CN"}`)
 			default:
@@ -197,12 +193,12 @@ func TestRunGen_RuntimeFailureBranches(t *testing.T) {
 		defer ts.Close()
 
 		oldBase := workerBaseURL
-		oldPoll := pollIntervalMs
+		oldPoll := streamTimeoutSecond
 		workerBaseURL = ts.URL
-		pollIntervalMs = 1
+		streamTimeoutSecond = 1
 		defer func() {
 			workerBaseURL = oldBase
-			pollIntervalMs = oldPoll
+			streamTimeoutSecond = oldPoll
 		}()
 
 		outFile := filepath.Join(t.TempDir(), "as-file")
@@ -215,7 +211,7 @@ func TestRunGen_RuntimeFailureBranches(t *testing.T) {
 		}
 	})
 
-	t.Run("job_status_read_fail", func(t *testing.T) {
+	t.Run("job_events_stream_fail", func(t *testing.T) {
 		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch {
 			case r.Method == http.MethodPost && r.URL.Path == "/v1/auth/exchange":
@@ -224,9 +220,7 @@ func TestRunGen_RuntimeFailureBranches(t *testing.T) {
 				_, _ = io.WriteString(w, `{"up_to_date":true,"rules_version":"v1"}`)
 			case r.Method == http.MethodPost && r.URL.Path == "/v1/generate":
 				_, _ = io.WriteString(w, `{"job_id":"job3","status":"queued"}`)
-			case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job3/trace":
-				_, _ = io.WriteString(w, `{"ok":true,"job_id":"job3","job_status":"running","tenant_id":"demo","trace_count":0,"limit":300,"offset":0,"next_offset":0,"has_more":false,"items":[]}`)
-			case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job3":
+			case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job3/events":
 				w.WriteHeader(http.StatusBadRequest)
 				_, _ = io.WriteString(w, "bad")
 			default:
@@ -236,12 +230,12 @@ func TestRunGen_RuntimeFailureBranches(t *testing.T) {
 		defer ts.Close()
 
 		oldBase := workerBaseURL
-		oldPoll := pollIntervalMs
+		oldPoll := streamTimeoutSecond
 		workerBaseURL = ts.URL
-		pollIntervalMs = 1
+		streamTimeoutSecond = 1
 		defer func() {
 			workerBaseURL = oldBase
-			pollIntervalMs = oldPoll
+			streamTimeoutSecond = oldPoll
 		}()
 
 		err := RunGen(context.Background(), GenOptions{OutputDir: t.TempDir(), Inputs: []string{inputPath}})

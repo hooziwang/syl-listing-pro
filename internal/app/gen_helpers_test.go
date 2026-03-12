@@ -21,19 +21,19 @@ func TestSkipTraceHelpers(t *testing.T) {
 		t.Fatal("POST should not skip")
 	}
 
-	if !shouldSkipVerboseWorkerTrace(client.JobTraceItem{Source: "api", Event: "job_status_read"}) {
-		t.Fatal("job_status_read should skip")
+	if !shouldSkipVerboseWorkerTrace(client.JobTraceItem{Source: "api", Event: "job_result_not_ready"}) {
+		t.Fatal("job_result_not_ready should skip")
 	}
 	if !shouldSkipVerboseWorkerTrace(client.JobTraceItem{Source: "llm", Event: "agent_team_candidate_failed"}) {
 		t.Fatal("agent_team_candidate_failed should skip")
 	}
-	if shouldSkipVerboseWorkerTrace(client.JobTraceItem{Source: "engine", Event: "job_status_read"}) {
+	if shouldSkipVerboseWorkerTrace(client.JobTraceItem{Source: "engine", Event: "job_result_not_ready"}) {
 		t.Fatal("non-api should not skip")
 	}
 }
 
 func TestRenderWorkerTraceLine(t *testing.T) {
-	if got := renderWorkerTraceLine(client.JobTraceItem{Source: "api", Event: "job_status_read"}, false); got != "" {
+	if got := renderWorkerTraceLine(client.JobTraceItem{Source: "api", Event: "job_result_not_ready"}, false); got != "" {
 		t.Fatalf("expected empty, got %q", got)
 	}
 

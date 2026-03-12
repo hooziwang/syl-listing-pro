@@ -226,7 +226,6 @@ func TestRunGen_SuccessWithCachedRules(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var traceOnce bool
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/auth/exchange":
@@ -235,15 +234,10 @@ func TestRunGen_SuccessWithCachedRules(t *testing.T) {
 			_, _ = io.WriteString(w, `{"up_to_date":true,"rules_version":"v1"}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/generate":
 			_, _ = io.WriteString(w, `{"job_id":"job_1","status":"queued"}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job_1/trace":
-			if !traceOnce {
-				traceOnce = true
-				_, _ = io.WriteString(w, `{"ok":true,"job_id":"job_1","job_status":"running","tenant_id":"demo","trace_count":3,"limit":300,"offset":0,"next_offset":3,"has_more":false,"items":[{"source":"engine","event":"generate_queued","tenant_id":"demo","job_id":"job_1","elapsed_ms":0,"payload":{}},{"source":"engine","event":"rules_loaded","tenant_id":"demo","job_id":"job_1","elapsed_ms":1,"payload":{"rules_version":"v1"}},{"source":"engine","event":"generation_ok","tenant_id":"demo","job_id":"job_1","elapsed_ms":2,"payload":{"timing_ms":2}}]}`)
-				return
-			}
-			_, _ = io.WriteString(w, `{"ok":true,"job_id":"job_1","job_status":"running","tenant_id":"demo","trace_count":0,"limit":300,"offset":3,"next_offset":3,"has_more":false,"items":[]}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job_1":
-			_, _ = io.WriteString(w, `{"job_id":"job_1","status":"succeeded"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job_1/events":
+			writeSSETrace(t, w, 1, `{"job_id":"job_1","tenant_id":"demo","offset":1,"item":{"source":"generation","event":"generate_queued","tenant_id":"demo","job_id":"job_1","elapsed_ms":0,"payload":{}}}`)
+			writeSSETrace(t, w, 2, `{"job_id":"job_1","tenant_id":"demo","offset":2,"item":{"source":"generation","event":"rules_loaded","tenant_id":"demo","job_id":"job_1","elapsed_ms":1,"payload":{"rules_version":"v1"}}}`)
+			writeSSEEvent(t, w, "status", `{"job_id":"job_1","tenant_id":"demo","status":"succeeded","updated_at":"2026-03-12T00:00:02Z"}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job_1/result":
 			_, _ = io.WriteString(w, `{"en_markdown":"# EN","cn_markdown":"# CN"}`)
 		default:
@@ -253,15 +247,12 @@ func TestRunGen_SuccessWithCachedRules(t *testing.T) {
 	defer ts.Close()
 
 	oldBase := workerBaseURL
-	oldPollMs := pollIntervalMs
-	oldPollTimeout := pollTimeoutSecond
+	oldTimeout := streamTimeoutSecond
 	workerBaseURL = ts.URL
-	pollIntervalMs = 1
-	pollTimeoutSecond = 5
+	streamTimeoutSecond = 5
 	defer func() {
 		workerBaseURL = oldBase
-		pollIntervalMs = oldPollMs
-		pollTimeoutSecond = oldPollTimeout
+		streamTimeoutSecond = oldTimeout
 	}()
 
 	inputPath := filepath.Join(t.TempDir(), "req.md")
@@ -279,6 +270,97 @@ func TestRunGen_SuccessWithCachedRules(t *testing.T) {
 	}
 	if len(ents) != 2 {
 		t.Fatalf("expected 2 output files, got %d", len(ents))
+	}
+}
+
+func TestRunGen_SuccessWithSSEEvents(t *testing.T) {
+	stubDocxConverter(t)
+	home := t.TempDir()
+	cacheHome := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", cacheHome)
+	writeKeyEnvForTest(t, home)
+
+	cacheDir, err := rules.DefaultCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	archiveBytes := makeRulesArchiveBytes(t, "#MARK")
+	archivePath, err := rules.SaveArchive(cacheDir, "demo", "v1", archiveBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rules.SaveState(cacheDir, "demo", rules.CacheState{RulesVersion: "v1", ManifestSHA: "sha", ArchivePath: archivePath}); err != nil {
+		t.Fatal(err)
+	}
+
+	var eventRequested bool
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/auth/exchange":
+			_, _ = io.WriteString(w, `{"access_token":"at","tenant_id":"demo","expires_in":3600}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/rules/resolve":
+			_, _ = io.WriteString(w, `{"up_to_date":true,"rules_version":"v1"}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/generate":
+			_, _ = io.WriteString(w, `{"job_id":"job_sse","status":"queued"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job_sse/events":
+			eventRequested = true
+			w.Header().Set("Content-Type", "text/event-stream")
+			flusher, ok := w.(http.Flusher)
+			if !ok {
+				t.Fatal("response writer does not support flushing")
+			}
+			_, _ = io.WriteString(w, "event: trace\n")
+			_, _ = io.WriteString(w, "id: 1\n")
+			_, _ = io.WriteString(w, "data: {\"job_id\":\"job_sse\",\"tenant_id\":\"demo\",\"offset\":1,\"item\":{\"source\":\"generation\",\"event\":\"generate_queued\",\"tenant_id\":\"demo\",\"job_id\":\"job_sse\",\"elapsed_ms\":0,\"payload\":{}}}\n\n")
+			flusher.Flush()
+			_, _ = io.WriteString(w, "event: trace\n")
+			_, _ = io.WriteString(w, "id: 2\n")
+			_, _ = io.WriteString(w, "data: {\"job_id\":\"job_sse\",\"tenant_id\":\"demo\",\"offset\":2,\"item\":{\"source\":\"generation\",\"event\":\"rules_loaded\",\"tenant_id\":\"demo\",\"job_id\":\"job_sse\",\"elapsed_ms\":1,\"payload\":{\"rules_version\":\"v1\"}}}\n\n")
+			flusher.Flush()
+			_, _ = io.WriteString(w, "event: status\n")
+			_, _ = io.WriteString(w, "data: {\"job_id\":\"job_sse\",\"tenant_id\":\"demo\",\"status\":\"succeeded\",\"updated_at\":\"2026-03-12T00:00:02Z\"}\n\n")
+			flusher.Flush()
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job_sse/result":
+			_, _ = io.WriteString(w, `{"en_markdown":"# EN","cn_markdown":"# CN"}`)
+		case r.Method == http.MethodGet && (r.URL.Path == "/v1/jobs/job_sse" || r.URL.Path == "/v1/jobs/job_sse/trace"):
+			t.Fatalf("unexpected legacy status request: %s %s", r.Method, r.URL.Path)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+
+	oldBase := workerBaseURL
+	oldTimeout := streamTimeoutSecond
+	workerBaseURL = ts.URL
+	streamTimeoutSecond = 5
+	defer func() {
+		workerBaseURL = oldBase
+		streamTimeoutSecond = oldTimeout
+	}()
+
+	outDir := t.TempDir()
+	inputPath := filepath.Join(t.TempDir(), "sample.md")
+	if err := os.WriteFile(inputPath, []byte("#MARK\n\nhello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := captureStdoutRun(t, func() error {
+		return RunGen(context.Background(), GenOptions{
+			Inputs:    []string{inputPath},
+			OutputDir: outDir,
+			Num:       1,
+		})
+	})
+	if err != nil {
+		t.Fatalf("Run error: %v\nout=%s", err, out)
+	}
+	if !eventRequested {
+		t.Fatal("expected CLI to connect /events SSE endpoint")
+	}
+	if !strings.Contains(out, "规则已加载 v1") {
+		t.Fatalf("stdout missing SSE trace output: %s", out)
 	}
 }
 
@@ -364,10 +446,8 @@ func TestRunGen_CallsDocxConverterWithoutHighlightWords(t *testing.T) {
 			_, _ = io.WriteString(w, `{"up_to_date":true,"rules_version":"v1"}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/generate":
 			_, _ = io.WriteString(w, `{"job_id":"job_meta","status":"queued"}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job_meta/trace":
-			_, _ = io.WriteString(w, `{"ok":true,"job_id":"job_meta","job_status":"running","tenant_id":"demo","trace_count":0,"limit":300,"offset":0,"next_offset":0,"has_more":false,"items":[]}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job_meta":
-			_, _ = io.WriteString(w, `{"job_id":"job_meta","status":"succeeded"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job_meta/events":
+			writeSSEEvent(t, w, "status", `{"job_id":"job_meta","tenant_id":"demo","status":"succeeded","updated_at":"2026-03-12T00:00:02Z"}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job_meta/result":
 			_, _ = io.WriteString(w, `{"en_markdown":"# EN","cn_markdown":"# CN"}`)
 		default:
@@ -377,12 +457,12 @@ func TestRunGen_CallsDocxConverterWithoutHighlightWords(t *testing.T) {
 	defer ts.Close()
 
 	oldBase := workerBaseURL
-	oldPoll := pollIntervalMs
+	oldTimeout := streamTimeoutSecond
 	workerBaseURL = ts.URL
-	pollIntervalMs = 1
+	streamTimeoutSecond = 1
 	defer func() {
 		workerBaseURL = oldBase
-		pollIntervalMs = oldPoll
+		streamTimeoutSecond = oldTimeout
 	}()
 
 	inputPath := filepath.Join(t.TempDir(), "req.md")
@@ -455,7 +535,7 @@ func TestRunGen_GenerateAndJobFailurePaths(t *testing.T) {
 		}
 	})
 
-	// 子用例2：job 轮询返回 failed
+	// 子用例2：job 事件流返回 failed
 	t.Run("job_failed", func(t *testing.T) {
 		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch {
@@ -465,10 +545,8 @@ func TestRunGen_GenerateAndJobFailurePaths(t *testing.T) {
 				_, _ = io.WriteString(w, `{"up_to_date":true,"rules_version":"v1"}`)
 			case r.Method == http.MethodPost && r.URL.Path == "/v1/generate":
 				_, _ = io.WriteString(w, `{"job_id":"job_failed","status":"queued"}`)
-			case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job_failed/trace":
-				_, _ = io.WriteString(w, `{"ok":true,"job_id":"job_failed","job_status":"running","tenant_id":"demo","trace_count":0,"limit":300,"offset":0,"next_offset":0,"has_more":false,"items":[]}`)
-			case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job_failed":
-				_, _ = io.WriteString(w, `{"job_id":"job_failed","status":"failed","error":"engine failed"}`)
+			case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job_failed/events":
+				writeSSEEvent(t, w, "status", `{"job_id":"job_failed","tenant_id":"demo","status":"failed","error":"engine failed","updated_at":"2026-03-12T00:00:02Z"}`)
 			default:
 				w.WriteHeader(http.StatusNotFound)
 			}
@@ -476,12 +554,12 @@ func TestRunGen_GenerateAndJobFailurePaths(t *testing.T) {
 		defer ts.Close()
 
 		oldBase := workerBaseURL
-		oldPoll := pollIntervalMs
+		oldTimeout := streamTimeoutSecond
 		workerBaseURL = ts.URL
-		pollIntervalMs = 1
+		streamTimeoutSecond = 1
 		defer func() {
 			workerBaseURL = oldBase
-			pollIntervalMs = oldPoll
+			streamTimeoutSecond = oldTimeout
 		}()
 
 		err := RunGen(context.Background(), GenOptions{OutputDir: t.TempDir(), Inputs: []string{inputPath}})
@@ -523,10 +601,9 @@ func TestRunGen_Timeout(t *testing.T) {
 			_, _ = io.WriteString(w, `{"up_to_date":true,"rules_version":"v1"}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/generate":
 			_, _ = io.WriteString(w, `{"job_id":"job_timeout","status":"queued"}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job_timeout/trace":
-			_, _ = io.WriteString(w, `{"ok":true,"job_id":"job_timeout","job_status":"running","tenant_id":"demo","trace_count":0,"limit":300,"offset":0,"next_offset":0,"has_more":false,"items":[]}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job_timeout":
-			_, _ = io.WriteString(w, `{"job_id":"job_timeout","status":"running"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job_timeout/events":
+			w.Header().Set("Content-Type", "text/event-stream")
+			<-r.Context().Done()
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -534,15 +611,12 @@ func TestRunGen_Timeout(t *testing.T) {
 	defer ts.Close()
 
 	oldBase := workerBaseURL
-	oldPoll := pollIntervalMs
-	oldTimeout := pollTimeoutSecond
+	oldTimeout := streamTimeoutSecond
 	workerBaseURL = ts.URL
-	pollIntervalMs = 1
-	pollTimeoutSecond = 1
+	streamTimeoutSecond = 1
 	defer func() {
 		workerBaseURL = oldBase
-		pollIntervalMs = oldPoll
-		pollTimeoutSecond = oldTimeout
+		streamTimeoutSecond = oldTimeout
 	}()
 
 	err = RunGen(context.Background(), GenOptions{OutputDir: t.TempDir(), Inputs: []string{inputPath}})

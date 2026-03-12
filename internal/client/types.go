@@ -64,15 +64,23 @@ type JobTraceItem struct {
 	Payload   map[string]any `json:"payload,omitempty"`
 }
 
-type JobTraceResp struct {
-	OK         bool           `json:"ok"`
-	JobID      string         `json:"job_id"`
-	JobStatus  string         `json:"job_status"`
-	TenantID   string         `json:"tenant_id"`
-	TraceCount int            `json:"trace_count"`
-	Limit      int            `json:"limit"`
-	Offset     int            `json:"offset"`
-	NextOffset int            `json:"next_offset"`
-	HasMore    bool           `json:"has_more"`
-	Items      []JobTraceItem `json:"items"`
+type JobEventTrace struct {
+	JobID    string       `json:"job_id"`
+	TenantID string       `json:"tenant_id"`
+	Offset   int          `json:"offset"`
+	Item     JobTraceItem `json:"item"`
+}
+
+type JobEventStatus struct {
+	JobID     string `json:"job_id"`
+	TenantID  string `json:"tenant_id"`
+	Status    string `json:"status"`
+	UpdatedAt string `json:"updated_at"`
+	Error     string `json:"error,omitempty"`
+}
+
+type JobEvent struct {
+	Type   string
+	Trace  *JobEventTrace
+	Status *JobEventStatus
 }

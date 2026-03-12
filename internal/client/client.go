@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -182,21 +183,6 @@ func (a *API) Generate(ctx context.Context, token string, in GenerateReq) (Gener
 	return out, nil
 }
 
-func (a *API) Job(ctx context.Context, token, jobID string) (JobStatusResp, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.baseURL+"/v1/jobs/"+jobID, nil)
-	if err != nil {
-		return JobStatusResp{}, err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	var out JobStatusResp
-	if err := a.doJSONWithRetry(ctx, jobPollMaxAttempts, func() (*http.Request, error) {
-		return cloneRequest(req)
-	}, &out); err != nil {
-		return JobStatusResp{}, err
-	}
-	return out, nil
-}
-
 func (a *API) CancelJob(ctx context.Context, token, jobID string) (CancelResp, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.baseURL+"/v1/jobs/"+jobID+"/cancel", nil)
 	if err != nil {
@@ -208,35 +194,6 @@ func (a *API) CancelJob(ctx context.Context, token, jobID string) (CancelResp, e
 		return cloneRequest(req)
 	}, &out); err != nil {
 		return CancelResp{}, err
-	}
-	return out, nil
-}
-
-func (a *API) JobTrace(ctx context.Context, token, jobID string, offset, limit int) (JobTraceResp, error) {
-	u, err := url.Parse(a.baseURL)
-	if err != nil {
-		return JobTraceResp{}, err
-	}
-	u.Path = path.Join(u.Path, "/v1/jobs/"+jobID+"/trace")
-	q := u.Query()
-	if offset > 0 {
-		q.Set("offset", fmt.Sprintf("%d", offset))
-	}
-	if limit > 0 {
-		q.Set("limit", fmt.Sprintf("%d", limit))
-	}
-	u.RawQuery = q.Encode()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
-	if err != nil {
-		return JobTraceResp{}, err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	var out JobTraceResp
-	if err := a.doJSONWithRetry(ctx, jobPollMaxAttempts, func() (*http.Request, error) {
-		return cloneRequest(req)
-	}, &out); err != nil {
-		return JobTraceResp{}, err
 	}
 	return out, nil
 }
@@ -254,6 +211,143 @@ func (a *API) Result(ctx context.Context, token, jobID string) (ResultResp, erro
 		return ResultResp{}, err
 	}
 	return out, nil
+}
+
+func (a *API) JobEvents(ctx context.Context, token, jobID string, onEvent func(JobEvent)) (JobStatusResp, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.baseURL+"/v1/jobs/"+jobID+"/events", nil)
+	if err != nil {
+		return JobStatusResp{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "text/event-stream")
+	reqBody := readReqBody(req)
+	a.emitTrace(TraceEvent{
+		Stage:   "request",
+		Method:  req.Method,
+		URL:     req.URL.String(),
+		Request: reqBody,
+	})
+	start := time.Now()
+	streamHTTP := *a.http
+	streamHTTP.Timeout = 0
+	resp, err := streamHTTP.Do(req)
+	if err != nil {
+		a.emitTrace(TraceEvent{
+			Stage:      "error",
+			Method:     req.Method,
+			URL:        req.URL.String(),
+			DurationMs: time.Since(start).Milliseconds(),
+			Request:    reqBody,
+			Error:      err.Error(),
+		})
+		return JobStatusResp{}, err
+	}
+	defer resp.Body.Close()
+
+	a.emitTrace(TraceEvent{
+		Stage:      "response",
+		Method:     req.Method,
+		URL:        req.URL.String(),
+		StatusCode: resp.StatusCode,
+		DurationMs: time.Since(start).Milliseconds(),
+		Request:    reqBody,
+		Response:   resp.Header.Get("Content-Type"),
+	})
+	if resp.StatusCode/100 != 2 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+		return JobStatusResp{}, &httpStatusError{
+			statusCode: resp.StatusCode,
+			status:     resp.Status,
+			body:       string(body),
+		}
+	}
+
+	reader := bufio.NewReader(resp.Body)
+	var (
+		eventName   string
+		eventID     string
+		dataLines   []string
+		finalStatus *JobStatusResp
+	)
+	flushEvent := func() error {
+		if len(dataLines) == 0 {
+			eventName = ""
+			eventID = ""
+			return nil
+		}
+		data := strings.Join(dataLines, "\n")
+		switch eventName {
+		case "trace":
+			var traceEvt JobEventTrace
+			if err := json.Unmarshal([]byte(data), &traceEvt); err != nil {
+				return fmt.Errorf("解析 SSE trace 失败: %w", err)
+			}
+			if onEvent != nil {
+				onEvent(JobEvent{
+					Type:  "trace",
+					Trace: &traceEvt,
+				})
+			}
+		case "status":
+			var statusEvt JobEventStatus
+			if err := json.Unmarshal([]byte(data), &statusEvt); err != nil {
+				return fmt.Errorf("解析 SSE status 失败: %w", err)
+			}
+			if onEvent != nil {
+				onEvent(JobEvent{
+					Type:   "status",
+					Status: &statusEvt,
+				})
+			}
+			if statusEvt.Status == "succeeded" || statusEvt.Status == "failed" || statusEvt.Status == "cancelled" {
+				finalStatus = &JobStatusResp{
+					JobID:     statusEvt.JobID,
+					Status:    statusEvt.Status,
+					Error:     statusEvt.Error,
+					UpdatedAt: statusEvt.UpdatedAt,
+				}
+			}
+		}
+		eventName = ""
+		eventID = ""
+		dataLines = dataLines[:0]
+		_ = eventID
+		return nil
+	}
+
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				if flushErr := flushEvent(); flushErr != nil {
+					return JobStatusResp{}, flushErr
+				}
+				if finalStatus != nil {
+					return *finalStatus, nil
+				}
+				return JobStatusResp{}, fmt.Errorf("job event stream ended before terminal status")
+			}
+			return JobStatusResp{}, err
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if line == "" {
+			if flushErr := flushEvent(); flushErr != nil {
+				return JobStatusResp{}, flushErr
+			}
+			continue
+		}
+		if strings.HasPrefix(line, ":") {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(line, "event:"):
+			eventName = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		case strings.HasPrefix(line, "id:"):
+			eventID = strings.TrimSpace(strings.TrimPrefix(line, "id:"))
+		case strings.HasPrefix(line, "data:"):
+			dataLines = append(dataLines, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+		}
+	}
 }
 
 func (a *API) Download(ctx context.Context, token, rawURL string) ([]byte, string, error) {

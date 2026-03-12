@@ -53,12 +53,11 @@ func newRunGenFastSuccessServer(t *testing.T) *httptest.Server {
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/generate":
 			id := seq.Add(1)
 			_, _ = io.WriteString(w, fmt.Sprintf(`{"job_id":"job_%d","status":"queued"}`, id))
-		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/jobs/job_") && strings.HasSuffix(r.URL.Path, "/trace"):
-			jobID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/jobs/"), "/trace")
-			_, _ = io.WriteString(w, fmt.Sprintf(`{"ok":true,"job_id":"%s","job_status":"running","tenant_id":"demo","trace_count":3,"limit":300,"offset":0,"next_offset":3,"has_more":false,"items":[{"source":"engine","event":"generate_queued","tenant_id":"demo","job_id":"%s","elapsed_ms":0,"payload":{}},{"source":"engine","event":"rules_loaded","tenant_id":"demo","job_id":"%s","elapsed_ms":1,"payload":{"rules_version":"v1"}},{"source":"engine","event":"generation_ok","tenant_id":"demo","job_id":"%s","elapsed_ms":2,"payload":{"timing_ms":2}}]}`, jobID, jobID, jobID, jobID))
-		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/jobs/job_") &&
-			!strings.HasSuffix(r.URL.Path, "/trace") && !strings.HasSuffix(r.URL.Path, "/result"):
-			_, _ = io.WriteString(w, `{"job_id":"x","status":"succeeded"}`)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/jobs/job_") && strings.HasSuffix(r.URL.Path, "/events"):
+			jobID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/jobs/"), "/events")
+			writeSSETrace(t, w, 1, fmt.Sprintf(`{"job_id":"%s","tenant_id":"demo","offset":1,"item":{"source":"generation","event":"generate_queued","tenant_id":"demo","job_id":"%s","elapsed_ms":0,"payload":{}}}`, jobID, jobID))
+			writeSSETrace(t, w, 2, fmt.Sprintf(`{"job_id":"%s","tenant_id":"demo","offset":2,"item":{"source":"generation","event":"rules_loaded","tenant_id":"demo","job_id":"%s","elapsed_ms":1,"payload":{"rules_version":"v1"}}}`, jobID, jobID))
+			writeSSEEvent(t, w, "status", fmt.Sprintf(`{"job_id":"%s","tenant_id":"demo","status":"succeeded","updated_at":"2026-03-12T00:00:02Z"}`, jobID))
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/jobs/job_") && strings.HasSuffix(r.URL.Path, "/result"):
 			_, _ = io.WriteString(w, `{"en_markdown":"# EN","cn_markdown":"# CN"}`)
 		default:
@@ -74,17 +73,14 @@ func TestRunGen_TaskLabelFormats(t *testing.T) {
 	defer ts.Close()
 
 	oldBase := workerBaseURL
-	oldPollMs := pollIntervalMs
-	oldPollTimeout := pollTimeoutSecond
+	oldTimeout := streamTimeoutSecond
 	oldMax := maxConcurrentTasks
 	workerBaseURL = ts.URL
-	pollIntervalMs = 1
-	pollTimeoutSecond = 5
+	streamTimeoutSecond = 5
 	maxConcurrentTasks = 16
 	defer func() {
 		workerBaseURL = oldBase
-		pollIntervalMs = oldPollMs
-		pollTimeoutSecond = oldPollTimeout
+		streamTimeoutSecond = oldTimeout
 		maxConcurrentTasks = oldMax
 	}()
 
@@ -163,10 +159,9 @@ func TestRunGen_ConcurrencyLimit(t *testing.T) {
 			_ = current.Add(-1)
 			id := seq.Add(1)
 			_, _ = io.WriteString(w, fmt.Sprintf(`{"job_id":"job_%d","status":"queued"}`, id))
-		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/trace"):
-			_, _ = io.WriteString(w, `{"ok":true,"job_id":"x","job_status":"running","tenant_id":"demo","trace_count":0,"limit":300,"offset":0,"next_offset":0,"has_more":false,"items":[]}`)
-		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/jobs/job_") && !strings.HasSuffix(r.URL.Path, "/result") && !strings.HasSuffix(r.URL.Path, "/trace"):
-			_, _ = io.WriteString(w, `{"job_id":"x","status":"succeeded"}`)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/jobs/job_") && strings.HasSuffix(r.URL.Path, "/events"):
+			jobID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/jobs/"), "/events")
+			writeSSEEvent(t, w, "status", fmt.Sprintf(`{"job_id":"%s","tenant_id":"demo","status":"succeeded","updated_at":"2026-03-12T00:00:02Z"}`, jobID))
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/result"):
 			_, _ = io.WriteString(w, `{"en_markdown":"# EN","cn_markdown":"# CN"}`)
 		default:
@@ -176,17 +171,14 @@ func TestRunGen_ConcurrencyLimit(t *testing.T) {
 	defer ts.Close()
 
 	oldBase := workerBaseURL
-	oldPollMs := pollIntervalMs
-	oldPollTimeout := pollTimeoutSecond
+	oldTimeout := streamTimeoutSecond
 	oldMax := maxConcurrentTasks
 	workerBaseURL = ts.URL
-	pollIntervalMs = 1
-	pollTimeoutSecond = 10
+	streamTimeoutSecond = 10
 	maxConcurrentTasks = 2
 	defer func() {
 		workerBaseURL = oldBase
-		pollIntervalMs = oldPollMs
-		pollTimeoutSecond = oldPollTimeout
+		streamTimeoutSecond = oldTimeout
 		maxConcurrentTasks = oldMax
 	}()
 
@@ -208,7 +200,6 @@ func TestRunGen_ConcurrencyLimit(t *testing.T) {
 func TestRunGen_TraceWarnOnlyOnce(t *testing.T) {
 	stubDocxConverter(t)
 	prepareRunGenCachedRules(t, "#MARK")
-	var jobReads atomic.Int64
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/auth/exchange":
@@ -217,16 +208,9 @@ func TestRunGen_TraceWarnOnlyOnce(t *testing.T) {
 			_, _ = io.WriteString(w, `{"up_to_date":true,"rules_version":"v1"}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/generate":
 			_, _ = io.WriteString(w, `{"job_id":"job_1","status":"queued"}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job_1/trace":
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job_1/events":
 			w.WriteHeader(http.StatusBadRequest)
-			_, _ = io.WriteString(w, "bad trace")
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job_1":
-			n := jobReads.Add(1)
-			if n < 3 {
-				_, _ = io.WriteString(w, `{"job_id":"job_1","status":"running"}`)
-				return
-			}
-			_, _ = io.WriteString(w, `{"job_id":"job_1","status":"succeeded"}`)
+			_, _ = io.WriteString(w, "bad events")
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job_1/result":
 			_, _ = io.WriteString(w, `{"en_markdown":"# EN","cn_markdown":"# CN"}`)
 		default:
@@ -236,15 +220,12 @@ func TestRunGen_TraceWarnOnlyOnce(t *testing.T) {
 	defer ts.Close()
 
 	oldBase := workerBaseURL
-	oldPoll := pollIntervalMs
-	oldTimeout := pollTimeoutSecond
+	oldTimeout := streamTimeoutSecond
 	workerBaseURL = ts.URL
-	pollIntervalMs = 1
-	pollTimeoutSecond = 5
+	streamTimeoutSecond = 5
 	defer func() {
 		workerBaseURL = oldBase
-		pollIntervalMs = oldPoll
-		pollTimeoutSecond = oldTimeout
+		streamTimeoutSecond = oldTimeout
 	}()
 
 	input := filepath.Join(t.TempDir(), "one.md")
@@ -254,10 +235,10 @@ func TestRunGen_TraceWarnOnlyOnce(t *testing.T) {
 	out, err := captureStdoutRun(t, func() error {
 		return RunGen(context.Background(), GenOptions{OutputDir: t.TempDir(), Inputs: []string{input}})
 	})
-	if err != nil {
-		t.Fatalf("RunGen error: %v", err)
+	if err == nil {
+		t.Fatal("expected RunGen to fail when SSE stream returns 400")
 	}
-	if c := strings.Count(out, "过程拉取失败，继续执行"); c != 1 {
+	if c := strings.Count(out, "过程流式接收失败"); c != 1 {
 		t.Fatalf("trace warning count=%d want=1, out=%s", c, out)
 	}
 }
@@ -319,17 +300,14 @@ func TestRunGen_SuccessDoesNotEmitInterruptCleanupAfterReturn(t *testing.T) {
 	defer ts.Close()
 
 	oldBase := workerBaseURL
-	oldPollMs := pollIntervalMs
-	oldPollTimeout := pollTimeoutSecond
+	oldTimeout := streamTimeoutSecond
 	oldMax := maxConcurrentTasks
 	workerBaseURL = ts.URL
-	pollIntervalMs = 1
-	pollTimeoutSecond = 5
+	streamTimeoutSecond = 5
 	maxConcurrentTasks = 16
 	defer func() {
 		workerBaseURL = oldBase
-		pollIntervalMs = oldPollMs
-		pollTimeoutSecond = oldPollTimeout
+		streamTimeoutSecond = oldTimeout
 		maxConcurrentTasks = oldMax
 	}()
 

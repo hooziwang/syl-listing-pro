@@ -10,9 +10,8 @@ const defaultWorkerBaseURL = "https://worker.aelus.tech"
 var workerBaseURL string
 
 var (
-	pollIntervalMs     = 800
-	pollTimeoutSecond  = 900
-	maxConcurrentTasks = 16
+	streamTimeoutSecond = 900
+	maxConcurrentTasks  = 16
 )
 
 func resolveWorkerBaseURL() string {
