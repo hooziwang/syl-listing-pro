@@ -572,6 +572,8 @@ func renderWorkerTraceLine(item client.JobTraceItem, colorizeLabel bool) string 
 		return ""
 	case "agent_team_candidate_failed":
 		return ""
+	case "agent_team_ok":
+		return fmt.Sprintf("%s生成完成%s", runtimeSectionLabel(item.Payload, colorizeLabel), tailDuration(item.Payload, "latency_ms", colorizeLabel))
 	case "job_retry_scheduled":
 		return fmt.Sprintf("任务重试计划：第 %d/%d 次失败，准备第 %d 次（等待由队列退避控制）：%s",
 			intPayload(item.Payload, "attempt"),
@@ -707,6 +709,19 @@ func sectionLabel(payload map[string]any, colorizeLabel bool) string {
 		return "步骤"
 	}
 	return stepLabel(section)
+}
+
+func runtimeSectionLabel(payload map[string]any, colorizeLabel bool) string {
+	switch strings.TrimSpace(stringPayload(payload, "section")) {
+	case "title":
+		return colorLabel("标题", colorizeLabel)
+	case "bullets":
+		return colorLabel("五点描述", colorizeLabel)
+	case "description":
+		return colorLabel("产品描述", colorizeLabel)
+	default:
+		return sectionLabel(payload, colorizeLabel)
+	}
 }
 
 func formatBaseLabelWithStep(baseLabel, step string, colorizeLabel bool) string {

@@ -65,6 +65,16 @@ func TestRenderWorkerTraceLine(t *testing.T) {
 		t.Fatalf("got=%q", got)
 	}
 
+	it = client.JobTraceItem{Event: "agent_team_ok", Payload: map[string]any{"section": "bullets", "step": "bullets_runtime_team_candidate_1", "latency_ms": 20345}}
+	if got = renderWorkerTraceLine(it, false); got != "五点描述生成完成 20.34s" {
+		t.Fatalf("got=%q", got)
+	}
+
+	it = client.JobTraceItem{Event: "agent_team_ok", Payload: map[string]any{"section": "title", "step": "title_runtime_team_candidate_1", "latency_ms": 27000}}
+	if got = renderWorkerTraceLine(it, true); got != "\x1b[92m标题\x1b[0m生成完成 \x1b[90m27.00s\x1b[0m" {
+		t.Fatalf("got=%q", got)
+	}
+
 	it = client.JobTraceItem{Event: "job_succeeded", Payload: map[string]any{"duration_ms": 61000}}
 	if got = renderWorkerTraceLine(it, false); !strings.Contains(got, "执行完成") || !strings.Contains(got, "1.02m") {
 		t.Fatalf("got=%q", got)
