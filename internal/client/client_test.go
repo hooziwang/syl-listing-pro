@@ -287,6 +287,77 @@ func TestJobEvents(t *testing.T) {
 	}
 }
 
+func TestJobEventsReconnectsFromLastOffset(t *testing.T) {
+	var requestCount atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/jr/events":
+			n := requestCount.Add(1)
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Cache-Control", "no-cache")
+			flusher, ok := w.(http.Flusher)
+			if !ok {
+				t.Fatal("response writer does not support flushing")
+			}
+			switch n {
+			case 1:
+				if got := r.URL.Query().Get("offset"); got != "" {
+					t.Fatalf("first offset=%q want empty", got)
+				}
+				_, _ = io.WriteString(w, "event: trace\n")
+				_, _ = io.WriteString(w, "id: 1\n")
+				_, _ = io.WriteString(w, "data: {\"job_id\":\"jr\",\"tenant_id\":\"demo\",\"offset\":1,\"item\":{\"ts\":\"2026-03-12T00:00:00Z\",\"source\":\"generation\",\"event\":\"generate_queued\",\"tenant_id\":\"demo\",\"job_id\":\"jr\",\"elapsed_ms\":0,\"payload\":{}}}\n\n")
+				flusher.Flush()
+				return
+			case 2:
+				if got := r.URL.Query().Get("offset"); got != "1" {
+					t.Fatalf("second offset=%q want 1", got)
+				}
+				_, _ = io.WriteString(w, "event: trace\n")
+				_, _ = io.WriteString(w, "id: 2\n")
+				_, _ = io.WriteString(w, "data: {\"job_id\":\"jr\",\"tenant_id\":\"demo\",\"offset\":2,\"item\":{\"ts\":\"2026-03-12T00:00:01Z\",\"source\":\"generation\",\"event\":\"rules_loaded\",\"tenant_id\":\"demo\",\"job_id\":\"jr\",\"elapsed_ms\":10,\"payload\":{\"rules_version\":\"v1\"}}}\n\n")
+				flusher.Flush()
+				_, _ = io.WriteString(w, "event: status\n")
+				_, _ = io.WriteString(w, "data: {\"job_id\":\"jr\",\"tenant_id\":\"demo\",\"status\":\"succeeded\",\"updated_at\":\"2026-03-12T00:00:02Z\"}\n\n")
+				flusher.Flush()
+				return
+			default:
+				t.Fatalf("unexpected request count=%d", n)
+			}
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+
+	api := New(ts.URL)
+	var events []JobEvent
+	status, err := api.JobEvents(context.Background(), "at", "jr", func(ev JobEvent) {
+		events = append(events, ev)
+	})
+	if err != nil {
+		t.Fatalf("JobEvents error: %v", err)
+	}
+	if status.JobID != "jr" || status.Status != "succeeded" {
+		t.Fatalf("status=%+v", status)
+	}
+	if requestCount.Load() != 2 {
+		t.Fatalf("requestCount=%d want=2", requestCount.Load())
+	}
+	if len(events) != 3 {
+		t.Fatalf("events=%d want=3", len(events))
+	}
+	if events[0].Type != "trace" || events[0].Trace == nil || events[0].Trace.Offset != 1 {
+		t.Fatalf("first event=%+v", events[0])
+	}
+	if events[1].Type != "trace" || events[1].Trace == nil || events[1].Trace.Offset != 2 {
+		t.Fatalf("second event=%+v", events[1])
+	}
+	if events[2].Type != "status" || events[2].Status == nil || events[2].Status.Status != "succeeded" {
+		t.Fatalf("third event=%+v", events[2])
+	}
+}
+
 func TestDoJSONOnceAndDownloadOnceErrorPaths(t *testing.T) {
 	api := &API{http: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		if req.URL.Path == "/timeout" {

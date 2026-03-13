@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -214,55 +215,102 @@ func (a *API) Result(ctx context.Context, token, jobID string) (ResultResp, erro
 }
 
 func (a *API) JobEvents(ctx context.Context, token, jobID string, onEvent func(JobEvent)) (JobStatusResp, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.baseURL+"/v1/jobs/"+jobID+"/events", nil)
-	if err != nil {
-		return JobStatusResp{}, err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "text/event-stream")
-	reqBody := readReqBody(req)
-	a.emitTrace(TraceEvent{
-		Stage:   "request",
-		Method:  req.Method,
-		URL:     req.URL.String(),
-		Request: reqBody,
-	})
-	start := time.Now()
 	streamHTTP := *a.http
 	streamHTTP.Timeout = 0
-	resp, err := streamHTTP.Do(req)
-	if err != nil {
+	lastTraceOffset := 0
+	reconnectAttempt := 0
+	for {
+		streamURL, err := url.Parse(a.baseURL + "/v1/jobs/" + jobID + "/events")
+		if err != nil {
+			return JobStatusResp{}, err
+		}
+		if lastTraceOffset > 0 {
+			q := streamURL.Query()
+			q.Set("offset", strconv.Itoa(lastTraceOffset))
+			streamURL.RawQuery = q.Encode()
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, streamURL.String(), nil)
+		if err != nil {
+			return JobStatusResp{}, err
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Accept", "text/event-stream")
+		reqBody := readReqBody(req)
 		a.emitTrace(TraceEvent{
-			Stage:      "error",
+			Stage:   "request",
+			Method:  req.Method,
+			URL:     req.URL.String(),
+			Request: reqBody,
+		})
+		start := time.Now()
+		resp, err := streamHTTP.Do(req)
+		if err != nil {
+			a.emitTrace(TraceEvent{
+				Stage:      "error",
+				Method:     req.Method,
+				URL:        req.URL.String(),
+				DurationMs: time.Since(start).Milliseconds(),
+				Request:    reqBody,
+				Error:      err.Error(),
+			})
+			if !isRetryableJobEventStreamErr(err) {
+				return JobStatusResp{}, err
+			}
+			reconnectAttempt++
+			if waitErr := waitJobEventStreamRetry(ctx, a, req, reconnectAttempt, lastTraceOffset, err); waitErr != nil {
+				return JobStatusResp{}, waitErr
+			}
+			continue
+		}
+
+		a.emitTrace(TraceEvent{
+			Stage:      "response",
 			Method:     req.Method,
 			URL:        req.URL.String(),
+			StatusCode: resp.StatusCode,
 			DurationMs: time.Since(start).Milliseconds(),
 			Request:    reqBody,
-			Error:      err.Error(),
+			Response:   resp.Header.Get("Content-Type"),
 		})
-		return JobStatusResp{}, err
-	}
-	defer resp.Body.Close()
+		if resp.StatusCode/100 != 2 {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+			_ = resp.Body.Close()
+			err = &httpStatusError{
+				statusCode: resp.StatusCode,
+				status:     resp.Status,
+				body:       string(body),
+			}
+			if !isRetryableJobEventStreamErr(err) {
+				return JobStatusResp{}, err
+			}
+			reconnectAttempt++
+			if waitErr := waitJobEventStreamRetry(ctx, a, req, reconnectAttempt, lastTraceOffset, err); waitErr != nil {
+				return JobStatusResp{}, waitErr
+			}
+			continue
+		}
 
-	a.emitTrace(TraceEvent{
-		Stage:      "response",
-		Method:     req.Method,
-		URL:        req.URL.String(),
-		StatusCode: resp.StatusCode,
-		DurationMs: time.Since(start).Milliseconds(),
-		Request:    reqBody,
-		Response:   resp.Header.Get("Content-Type"),
-	})
-	if resp.StatusCode/100 != 2 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-		return JobStatusResp{}, &httpStatusError{
-			statusCode: resp.StatusCode,
-			status:     resp.Status,
-			body:       string(body),
+		status, err := consumeJobEventStream(resp.Body, &lastTraceOffset, onEvent)
+		_ = resp.Body.Close()
+		if err == nil {
+			return status, nil
+		}
+		if !isRetryableJobEventStreamErr(err) {
+			return JobStatusResp{}, err
+		}
+		reconnectAttempt++
+		if waitErr := waitJobEventStreamRetry(ctx, a, req, reconnectAttempt, lastTraceOffset, err); waitErr != nil {
+			return JobStatusResp{}, waitErr
 		}
 	}
+}
 
-	reader := bufio.NewReader(resp.Body)
+func consumeJobEventStream(
+	body io.Reader,
+	lastTraceOffset *int,
+	onEvent func(JobEvent),
+) (JobStatusResp, error) {
+	reader := bufio.NewReader(body)
 	var (
 		eventName   string
 		eventID     string
@@ -281,6 +329,15 @@ func (a *API) JobEvents(ctx context.Context, token, jobID string, onEvent func(J
 			var traceEvt JobEventTrace
 			if err := json.Unmarshal([]byte(data), &traceEvt); err != nil {
 				return fmt.Errorf("解析 SSE trace 失败: %w", err)
+			}
+			if lastTraceOffset != nil && traceEvt.Offset > 0 {
+				if traceEvt.Offset <= *lastTraceOffset {
+					eventName = ""
+					eventID = ""
+					dataLines = dataLines[:0]
+					return nil
+				}
+				*lastTraceOffset = traceEvt.Offset
 			}
 			if onEvent != nil {
 				onEvent(JobEvent{
@@ -533,6 +590,46 @@ func retryBackoff(attempt int) time.Duration {
 		return retryBackoffMax
 	}
 	return d
+}
+
+func isRetryableJobEventStreamErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if strings.Contains(strings.ToLower(err.Error()), "job event stream ended before terminal status") {
+		return true
+	}
+	return isRetryableRequestErr(err)
+}
+
+func waitJobEventStreamRetry(
+	ctx context.Context,
+	api *API,
+	req *http.Request,
+	attempt int,
+	lastTraceOffset int,
+	retryErr error,
+) error {
+	backoff := retryBackoff(attempt)
+	api.emitTrace(TraceEvent{
+		Stage:      "retry",
+		Method:     req.Method,
+		URL:        req.URL.String(),
+		DurationMs: backoff.Milliseconds(),
+		Error:      retryErr.Error(),
+		Request:    fmt.Sprintf(`{"attempt":%d,"next_attempt":%d,"offset":%d}`, attempt, attempt+1, lastTraceOffset),
+	})
+	timer := time.NewTimer(backoff)
+	select {
+	case <-ctx.Done():
+		timer.Stop()
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func isRetryableRequestErr(err error) bool {

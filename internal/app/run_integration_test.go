@@ -364,6 +364,99 @@ func TestRunGen_SuccessWithSSEEvents(t *testing.T) {
 	}
 }
 
+func TestRunGen_ReconnectsSSEStreamFromLastOffset(t *testing.T) {
+	stubDocxConverter(t)
+	home := t.TempDir()
+	cacheHome := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", cacheHome)
+	writeKeyEnvForTest(t, home)
+
+	cacheDir, err := rules.DefaultCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	archiveBytes := makeRulesArchiveBytes(t, "#MARK")
+	archivePath, err := rules.SaveArchive(cacheDir, "demo", "v1", archiveBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rules.SaveState(cacheDir, "demo", rules.CacheState{RulesVersion: "v1", ManifestSHA: "sha", ArchivePath: archivePath}); err != nil {
+		t.Fatal(err)
+	}
+
+	var eventsRequestCount int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/auth/exchange":
+			_, _ = io.WriteString(w, `{"access_token":"at","tenant_id":"demo","expires_in":3600}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/rules/resolve":
+			_, _ = io.WriteString(w, `{"up_to_date":true,"rules_version":"v1"}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/generate":
+			_, _ = io.WriteString(w, `{"job_id":"job_resume","status":"queued"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job_resume/events":
+			eventsRequestCount++
+			switch eventsRequestCount {
+			case 1:
+				if got := r.URL.Query().Get("offset"); got != "" {
+					t.Fatalf("first offset=%q want empty", got)
+				}
+				writeSSETrace(t, w, 1, `{"job_id":"job_resume","tenant_id":"demo","offset":1,"item":{"source":"generation","event":"generate_queued","tenant_id":"demo","job_id":"job_resume","elapsed_ms":0,"payload":{}}}`)
+				return
+			case 2:
+				if got := r.URL.Query().Get("offset"); got != "1" {
+					t.Fatalf("second offset=%q want 1", got)
+				}
+				writeSSETrace(t, w, 2, `{"job_id":"job_resume","tenant_id":"demo","offset":2,"item":{"source":"generation","event":"rules_loaded","tenant_id":"demo","job_id":"job_resume","elapsed_ms":1,"payload":{"rules_version":"v1"}}}`)
+				writeSSEEvent(t, w, "status", `{"job_id":"job_resume","tenant_id":"demo","status":"succeeded","updated_at":"2026-03-12T00:00:02Z"}`)
+				return
+			default:
+				t.Fatalf("unexpected events request count=%d", eventsRequestCount)
+			}
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job_resume/result":
+			_, _ = io.WriteString(w, `{"en_markdown":"# EN","cn_markdown":"# CN"}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+
+	oldBase := workerBaseURL
+	oldTimeout := streamTimeoutSecond
+	workerBaseURL = ts.URL
+	streamTimeoutSecond = 5
+	defer func() {
+		workerBaseURL = oldBase
+		streamTimeoutSecond = oldTimeout
+	}()
+
+	outDir := t.TempDir()
+	inputPath := filepath.Join(t.TempDir(), "resume.md")
+	if err := os.WriteFile(inputPath, []byte("#MARK\n\nhello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := captureStdoutRun(t, func() error {
+		return RunGen(context.Background(), GenOptions{
+			Inputs:    []string{inputPath},
+			OutputDir: outDir,
+			Num:       1,
+		})
+	})
+	if err != nil {
+		t.Fatalf("Run error: %v\nout=%s", err, out)
+	}
+	if eventsRequestCount != 2 {
+		t.Fatalf("eventsRequestCount=%d want=2", eventsRequestCount)
+	}
+	if strings.Contains(out, "过程流式接收失败") {
+		t.Fatalf("stdout should not contain stream failure warning: %s", out)
+	}
+	if !strings.Contains(out, "规则已加载 v1") {
+		t.Fatalf("stdout missing resumed SSE trace output: %s", out)
+	}
+}
+
 func TestRunGen_RetryingStatusContinuesUntilSuccess(t *testing.T) {
 	stubDocxConverter(t)
 	home := t.TempDir()
