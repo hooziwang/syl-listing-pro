@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -11,6 +12,8 @@ type RequirementFile struct {
 	Path    string
 	Content string
 }
+
+var generatedOutputMarkdownPattern = regexp.MustCompile(`(?i)_[a-z0-9]{4}_((en)|(cn))\.(md|markdown)$`)
 
 func Discover(inputs []string) ([]RequirementFile, error) {
 	var out []RequirementFile
@@ -25,7 +28,13 @@ func Discover(inputs []string) ([]RequirementFile, error) {
 				if err != nil {
 					return err
 				}
-				if d.IsDir() || !isMarkdownFile(path) {
+				if d.IsDir() {
+					if shouldSkipDir(d.Name()) && path != in {
+						return filepath.SkipDir
+					}
+					return nil
+				}
+				if !shouldIncludeMarkdownFile(path, d.Name()) {
 					return nil
 				}
 				return appendRequirementFile(path, seen, &out)
@@ -33,6 +42,9 @@ func Discover(inputs []string) ([]RequirementFile, error) {
 			if err != nil {
 				return nil, err
 			}
+			continue
+		}
+		if !shouldIncludeMarkdownFile(in, filepath.Base(in)) {
 			continue
 		}
 		if err := appendRequirementFile(in, seen, &out); err != nil {
@@ -69,4 +81,29 @@ func isMarkdownFile(path string) bool {
 	default:
 		return false
 	}
+}
+
+func shouldSkipDir(name string) bool {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return false
+	}
+	if strings.HasPrefix(trimmed, ".") {
+		return true
+	}
+	return trimmed == "node_modules"
+}
+
+func shouldIncludeMarkdownFile(path string, name string) bool {
+	base := strings.TrimSpace(name)
+	if base == "" {
+		base = filepath.Base(path)
+	}
+	if strings.HasPrefix(base, ".") {
+		return false
+	}
+	if !isMarkdownFile(path) {
+		return false
+	}
+	return !generatedOutputMarkdownPattern.MatchString(strings.ToLower(base))
 }

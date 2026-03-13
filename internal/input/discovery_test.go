@@ -57,3 +57,46 @@ func TestDiscover_Errors(t *testing.T) {
 		t.Fatal("expected stat error")
 	}
 }
+
+func TestDiscover_SkipsHiddenNodeModulesAndGeneratedOutputs(t *testing.T) {
+	dir := t.TempDir()
+
+	keep := filepath.Join(dir, "input.md")
+	if err := os.WriteFile(keep, []byte("# source"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	hiddenDir := filepath.Join(dir, ".git")
+	if err := os.MkdirAll(hiddenDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hiddenDir, "hidden.md"), []byte("# hidden"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	nodeModulesDir := filepath.Join(dir, "node_modules", "pkg")
+	if err := os.MkdirAll(nodeModulesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nodeModulesDir, "dep.md"), []byte("# dep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "input_1234_en.md"), []byte("# generated en"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "input_1234_cn.markdown"), []byte("# generated cn"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	items, err := Discover([]string{dir})
+	if err != nil {
+		t.Fatalf("Discover error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("len=%d want=1", len(items))
+	}
+	if items[0].Path != keep {
+		t.Fatalf("got=%q want=%q", items[0].Path, keep)
+	}
+}
