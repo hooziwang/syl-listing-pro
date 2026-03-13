@@ -24,6 +24,7 @@ var (
 	lineLengthConstraintPattern = regexp.MustCompile(`^第(\d+)条长度不满足约束:\s*(\d+)（规则区间 \[(\d+),(\d+)\]，容差区间 \[(\d+),(\d+)\]）$`)
 	textLengthConstraintPattern = regexp.MustCompile(`^长度不满足约束:\s*(\d+)（规则区间 \[(\d+),(\d+)\]，容差区间 \[(\d+),(\d+)\]）$`)
 	keywordOrderPattern         = regexp.MustCompile(`^第(\d+)个关键词未按顺序原样出现:\s*(.+)$`)
+	runtimeCandidateStepPattern = regexp.MustCompile(`_candidate_(\d+)$`)
 )
 
 type GenOptions struct {
@@ -574,7 +575,7 @@ func renderWorkerTraceLine(item client.JobTraceItem, colorizeLabel bool) string 
 	case "agent_team_candidate_failed":
 		return ""
 	case "agent_team_ok":
-		return fmt.Sprintf("%s生成完成%s", runtimeSectionLabel(item.Payload, colorizeLabel), tailDuration(item.Payload, "latency_ms", colorizeLabel))
+		return fmt.Sprintf("%s%s生成完成%s", runtimeSectionLabel(item.Payload, colorizeLabel), runtimeCandidateLabel(item.Payload), tailDuration(item.Payload, "latency_ms", colorizeLabel))
 	case "runtime_candidate_selection":
 		label := runtimeSectionLabel(item.Payload, colorizeLabel)
 		scores := runtimeCandidateScores(item.Payload)
@@ -734,6 +735,25 @@ func runtimeSectionLabel(payload map[string]any, colorizeLabel bool) string {
 	default:
 		return sectionLabel(payload, colorizeLabel)
 	}
+}
+
+func runtimeCandidateLabel(payload map[string]any) string {
+	if candidateIndex := intPayload(payload, "candidate_index"); candidateIndex > 0 {
+		return fmt.Sprintf(" [候选#%d] ", candidateIndex)
+	}
+	step := strings.TrimSpace(stringPayload(payload, "step"))
+	if step == "" {
+		return ""
+	}
+	matched := runtimeCandidateStepPattern.FindStringSubmatch(step)
+	if len(matched) != 2 {
+		return ""
+	}
+	candidateIndex, err := strconv.Atoi(matched[1])
+	if err != nil || candidateIndex <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(" [候选#%d] ", candidateIndex)
 }
 
 func formatBaseLabelWithStep(baseLabel, step string, colorizeLabel bool) string {
