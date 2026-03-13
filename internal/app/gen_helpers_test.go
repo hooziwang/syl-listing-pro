@@ -59,9 +59,9 @@ func TestRenderWorkerTraceLine(t *testing.T) {
 		t.Fatalf("got=%q", got)
 	}
 
-	it = client.JobTraceItem{Event: "job_retry_scheduled", Payload: map[string]any{"attempt": 1, "max_attempts": 3, "next_attempt": 2, "error": strings.Repeat("e", 140)}}
+	it = client.JobTraceItem{Event: "job_retry_scheduled", Payload: map[string]any{"attempt": 1, "max_attempts": 3, "next_attempt": 2, "error": "section agent team validation failed: 第2条长度不满足约束: 237（规则区间 [240,250]，容差区间 [240,300]）"}}
 	got = renderWorkerTraceLine(it, false)
-	if !strings.Contains(got, "任务重试计划：第 1/3 次失败") || !strings.Contains(got, "...") {
+	if got != "任务重试计划：第 1/3 次失败，准备第 2 次（等待由队列退避控制）：第2条长度不足: 237<240" {
 		t.Fatalf("got=%q", got)
 	}
 
@@ -72,6 +72,37 @@ func TestRenderWorkerTraceLine(t *testing.T) {
 
 	it = client.JobTraceItem{Event: "agent_team_ok", Payload: map[string]any{"section": "title", "step": "title_runtime_team_candidate_1", "latency_ms": 27000}}
 	if got = renderWorkerTraceLine(it, true); got != "\x1b[92m标题\x1b[0m生成完成 \x1b[90m27.00s\x1b[0m" {
+		t.Fatalf("got=%q", got)
+	}
+
+	it = client.JobTraceItem{
+		Event: "runtime_candidate_selection",
+		Payload: map[string]any{
+			"section":                  "bullets",
+			"candidate_count":          2,
+			"selected_candidate_index": 2,
+			"candidates": []any{
+				map[string]any{"candidate_index": 1, "failure_reason": "section agent team validation failed: 第2条长度不满足约束: 235（规则区间 [240,250]，容差区间 [240,300]）", "selected": false},
+				map[string]any{"candidate_index": 2, "score": 1, "selected": true},
+			},
+		},
+	}
+	if got = renderWorkerTraceLine(it, false); got != "五点描述候选评分：#1失败(第2条长度不足: 235<240)，#2=1，已选 #2" {
+		t.Fatalf("got=%q", got)
+	}
+
+	it = client.JobTraceItem{
+		Event: "runtime_candidate_selection",
+		Payload: map[string]any{
+			"section":                  "title",
+			"duration_ms":              13555,
+			"selected_candidate_index": 1,
+			"candidates": []any{
+				map[string]any{"candidate_index": 1, "score": 68, "selected": true},
+			},
+		},
+	}
+	if got = renderWorkerTraceLine(it, true); got != "\x1b[92m标题\x1b[0m候选评分：#1=68，已选 #1 \x1b[90m13.55s\x1b[0m" {
 		t.Fatalf("got=%q", got)
 	}
 
@@ -278,6 +309,15 @@ func TestPayloadAndErrorsHelpers(t *testing.T) {
 	if got := formatLengthConstraintRange("bad", "x", "y", "z", "w"); got != "bad ? [z[x,y]w]" {
 		t.Fatalf("got=%q", got)
 	}
+	if got := summarizeCandidateFailure("section agent team validation failed: 第2条长度不满足约束: 235（规则区间 [240,250]，容差区间 [240,300]）"); got != "第2条长度不足: 235<240" {
+		t.Fatalf("got=%q", got)
+	}
+	if got := summarizeCandidateFailure("section agent team validation failed: 第1条长度不满足约束: 229（规则区间 [240,250]，容差区间 [240,300]）；第2条长度不满足约束: 236（规则区间 [240,250]，容差区间 [240,300]）"); got != "第1条长度不足: 229<240；第2条长度不足: 236<240" {
+		t.Fatalf("got=%q", got)
+	}
+	if got := summarizeCandidateFailure("section agent team validation failed: 第12个关键词未按顺序原样出现: wedding"); got != "关键词顺序错误: 第12个 wedding" {
+		t.Fatalf("got=%q", got)
+	}
 
 	if got := targetsLabel(map[string]any{"targets": []any{1.0, "2", int64(3)}}); got != "1,2,3" {
 		t.Fatalf("got=%q", got)
@@ -318,6 +358,9 @@ func TestDurationAndTextHelpers(t *testing.T) {
 	}
 
 	if got := shortText("abcdef", 4); got != "abcd..." {
+		t.Fatalf("got=%q", got)
+	}
+	if got := shortText("规则区间 [240,250]，容差区间 [240,300]", 18); got != "规则区间 [240,250]，容差区..." {
 		t.Fatalf("got=%q", got)
 	}
 	if got := shortText("abc", 4); got != "abc" {

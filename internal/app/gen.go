@@ -23,6 +23,7 @@ import (
 var (
 	lineLengthConstraintPattern = regexp.MustCompile(`^第(\d+)条长度不满足约束:\s*(\d+)（规则区间 \[(\d+),(\d+)\]，容差区间 \[(\d+),(\d+)\]）$`)
 	textLengthConstraintPattern = regexp.MustCompile(`^长度不满足约束:\s*(\d+)（规则区间 \[(\d+),(\d+)\]，容差区间 \[(\d+),(\d+)\]）$`)
+	keywordOrderPattern         = regexp.MustCompile(`^第(\d+)个关键词未按顺序原样出现:\s*(.+)$`)
 )
 
 type GenOptions struct {
@@ -574,12 +575,23 @@ func renderWorkerTraceLine(item client.JobTraceItem, colorizeLabel bool) string 
 		return ""
 	case "agent_team_ok":
 		return fmt.Sprintf("%s生成完成%s", runtimeSectionLabel(item.Payload, colorizeLabel), tailDuration(item.Payload, "latency_ms", colorizeLabel))
+	case "runtime_candidate_selection":
+		label := runtimeSectionLabel(item.Payload, colorizeLabel)
+		scores := runtimeCandidateScores(item.Payload)
+		if len(scores) == 0 {
+			return ""
+		}
+		selected := intPayload(item.Payload, "selected_candidate_index")
+		if selected > 0 {
+			return fmt.Sprintf("%s候选评分：%s，已选 #%d%s", label, strings.Join(scores, "，"), selected, tailDuration(item.Payload, "duration_ms", colorizeLabel))
+		}
+		return fmt.Sprintf("%s候选评分：%s%s", label, strings.Join(scores, "，"), tailDuration(item.Payload, "duration_ms", colorizeLabel))
 	case "job_retry_scheduled":
 		return fmt.Sprintf("任务重试计划：第 %d/%d 次失败，准备第 %d 次（等待由队列退避控制）：%s",
 			intPayload(item.Payload, "attempt"),
 			intPayload(item.Payload, "max_attempts"),
 			intPayload(item.Payload, "next_attempt"),
-			shortText(stringPayload(item.Payload, "error"), 100))
+			summarizeRetryError(stringPayload(item.Payload, "error")))
 	case "job_succeeded":
 		return fmt.Sprintf("执行完成%s", tailDuration(item.Payload, "duration_ms", colorizeLabel))
 	case "job_failed":
@@ -783,6 +795,116 @@ func intPayload(payload map[string]any, key string) int {
 	}
 }
 
+func runtimeCandidateScores(payload map[string]any) []string {
+	v, ok := payload["candidates"]
+	if !ok || v == nil {
+		return nil
+	}
+	items, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	scores := make([]string, 0, len(items))
+	for _, item := range items {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		candidateIndex := intPayload(m, "candidate_index")
+		if candidateIndex <= 0 {
+			continue
+		}
+		if reason := strings.TrimSpace(stringPayload(m, "failure_reason")); reason != "" {
+			scores = append(scores, fmt.Sprintf("#%d失败(%s)", candidateIndex, summarizeCandidateFailure(reason)))
+			continue
+		}
+		score := intPayload(m, "score")
+		scores = append(scores, fmt.Sprintf("#%d=%d", candidateIndex, score))
+	}
+	return scores
+}
+
+func summarizeCandidateFailure(reason string) string {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return "未知错误"
+	}
+	reason = strings.TrimPrefix(reason, "section agent team validation failed: ")
+	reason = strings.TrimPrefix(reason, "validation failed: ")
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return "未知错误"
+	}
+	parts := splitCandidateFailureReasons(reason)
+	if len(parts) > 1 {
+		summaries := make([]string, 0, len(parts))
+		for _, part := range parts {
+			summary := summarizeSingleCandidateFailure(part)
+			if summary != "" {
+				summaries = append(summaries, summary)
+			}
+		}
+		if len(summaries) > 0 {
+			return shortText(strings.Join(summaries, "；"), 72)
+		}
+	}
+	return summarizeSingleCandidateFailure(reason)
+}
+
+func summarizeRetryError(reason string) string {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return "未知错误"
+	}
+	if strings.Contains(reason, "validation failed") || strings.Contains(reason, "长度不满足约束") || strings.Contains(reason, "关键词") {
+		return summarizeCandidateFailure(reason)
+	}
+	return shortText(reason, 72)
+}
+
+func summarizeSingleCandidateFailure(reason string) string {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return "未知错误"
+	}
+	if matched := lineLengthConstraintPattern.FindStringSubmatch(reason); len(matched) == 7 {
+		actual, _ := strconv.Atoi(matched[2])
+		tolMin, _ := strconv.Atoi(matched[5])
+		tolMax, _ := strconv.Atoi(matched[6])
+		if actual < tolMin {
+			return fmt.Sprintf("第%s条长度不足: %d<%d", matched[1], actual, tolMin)
+		}
+		return fmt.Sprintf("第%s条长度超限: %d>%d", matched[1], actual, tolMax)
+	}
+	if matched := textLengthConstraintPattern.FindStringSubmatch(reason); len(matched) == 6 {
+		actual, _ := strconv.Atoi(matched[1])
+		tolMin, _ := strconv.Atoi(matched[4])
+		tolMax, _ := strconv.Atoi(matched[5])
+		if actual < tolMin {
+			return fmt.Sprintf("长度不足: %d<%d", actual, tolMin)
+		}
+		return fmt.Sprintf("长度超限: %d>%d", actual, tolMax)
+	}
+	if matched := keywordOrderPattern.FindStringSubmatch(reason); len(matched) == 3 {
+		return fmt.Sprintf("关键词顺序错误: 第%s个 %s", matched[1], strings.TrimSpace(matched[2]))
+	}
+	return shortText(formatValidationError(reason), 48)
+}
+
+func splitCandidateFailureReasons(reason string) []string {
+	fields := strings.FieldsFunc(reason, func(r rune) bool {
+		return r == ';' || r == '；'
+	})
+	out := make([]string, 0, len(fields))
+	for _, field := range fields {
+		field = strings.TrimSpace(field)
+		if field != "" {
+			out = append(out, field)
+		}
+	}
+	return out
+}
+
 func stringPayload(payload map[string]any, key string) string {
 	v, ok := payload[key]
 	if !ok || v == nil {
@@ -968,10 +1090,11 @@ func tailDuration(payload map[string]any, key string, colorize bool) string {
 }
 
 func shortText(s string, n int) string {
-	if n <= 0 || len(s) <= n {
+	runes := []rune(s)
+	if n <= 0 || len(runes) <= n {
 		return s
 	}
-	return strings.TrimSpace(s[:n]) + "..."
+	return strings.TrimSpace(string(runes[:n])) + "..."
 }
 
 func humanDurationShort(d time.Duration) string {
