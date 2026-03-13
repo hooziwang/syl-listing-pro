@@ -17,7 +17,6 @@ import (
 	"syl-listing-pro/internal/client"
 	"syl-listing-pro/internal/input"
 	"syl-listing-pro/internal/output"
-	"syl-listing-pro/internal/rules"
 )
 
 var (
@@ -79,10 +78,6 @@ func RunGen(ctx context.Context, opts GenOptions) error {
 	if opts.Num <= 0 {
 		opts.Num = 1
 	}
-	cacheDir, err := rules.DefaultCacheDir()
-	if err != nil {
-		return err
-	}
 	sylKey, err := loadSYLKeyForRun()
 	if err != nil {
 		return err
@@ -116,63 +111,7 @@ func RunGen(ctx context.Context, opts GenOptions) error {
 		return err
 	}
 
-	// 启动前同步规则；失败时按策略回退。
-	st, _ := rules.LoadState(cacheDir, ex.TenantID)
-	res, err := api.ResolveRules(ctx, ex.AccessToken, st.RulesVersion)
-	if err != nil {
-		if st.RulesVersion == "" || !rules.HasArchive(st.ArchivePath) {
-			return fmt.Errorf("规则中心不可达且首次运行无缓存")
-		}
-		log.Info(fmt.Sprintf("规则中心不可达，继续使用本地规则（%s）", st.RulesVersion))
-	} else {
-		needDownload := !res.UpToDate || !rules.HasArchive(st.ArchivePath) || st.RulesVersion != res.RulesVersion
-		if needDownload {
-			data, gotSHA, dErr := api.Download(ctx, ex.AccessToken, res.DownloadURL)
-			if dErr != nil {
-				if st.RulesVersion == "" || !rules.HasArchive(st.ArchivePath) {
-					return fmt.Errorf("首次拉规则失败: %w", dErr)
-				}
-				log.Info(fmt.Sprintf("规则下载失败，继续使用本地规则（%s）", st.RulesVersion))
-			} else if gotSHA != res.ManifestSHA {
-				if st.RulesVersion == "" || !rules.HasArchive(st.ArchivePath) {
-					return fmt.Errorf("首次拉规则 sha256 不匹配")
-				}
-				log.Info(fmt.Sprintf("规则校验失败，继续使用本地规则（%s）", st.RulesVersion))
-			} else {
-				p, sErr := rules.SaveArchive(cacheDir, ex.TenantID, res.RulesVersion, data)
-				if sErr != nil {
-					return sErr
-				}
-				if err := rules.VerifyArchiveSignatureWithBundledKeyOpenSSL(
-					cacheDir,
-					p,
-					res.SignatureBase64,
-					res.SigningPublicKeyPathInArchive,
-					res.SigningPublicKeySignatureBase64,
-				); err != nil {
-					if st.RulesVersion == "" || !rules.HasArchive(st.ArchivePath) {
-						return fmt.Errorf("首次拉规则签名校验失败: %w", err)
-					}
-					log.Info(fmt.Sprintf("规则签名校验失败，继续使用本地规则（%s）", st.RulesVersion))
-				} else {
-					st = rules.CacheState{RulesVersion: res.RulesVersion, ManifestSHA: res.ManifestSHA, ArchivePath: p}
-					if err := rules.SaveState(cacheDir, ex.TenantID, st); err != nil {
-						return err
-					}
-					log.Info(fmt.Sprintf("规则中心：规则中心更新成功（%s）", res.RulesVersion))
-				}
-			}
-		}
-	}
-	if st.RulesVersion == "" || !rules.HasArchive(st.ArchivePath) {
-		return fmt.Errorf("本地规则不可用")
-	}
-	marker, err := rules.LoadInputMarkerFromArchive(st.ArchivePath)
-	if err != nil {
-		return err
-	}
-
-	files, err := input.Discover(opts.Inputs, marker)
+	files, err := input.Discover(opts.Inputs)
 	if err != nil {
 		return err
 	}

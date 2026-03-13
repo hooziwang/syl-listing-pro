@@ -13,7 +13,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -137,32 +136,6 @@ func (a *API) Exchange(ctx context.Context, sylKey string) (ExchangeResp, error)
 	}, &out)
 	if err != nil {
 		return ExchangeResp{}, err
-	}
-	return out, nil
-}
-
-func (a *API) ResolveRules(ctx context.Context, token, current string) (RulesResolveResp, error) {
-	u, err := url.Parse(a.baseURL)
-	if err != nil {
-		return RulesResolveResp{}, err
-	}
-	u.Path = path.Join(u.Path, "/v1/rules/resolve")
-	q := u.Query()
-	if current != "" {
-		q.Set("current", current)
-	}
-	u.RawQuery = q.Encode()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
-	if err != nil {
-		return RulesResolveResp{}, err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	var out RulesResolveResp
-	if err := a.doJSONWithRetry(ctx, defaultMaxAttempts, func() (*http.Request, error) {
-		return cloneRequest(req)
-	}, &out); err != nil {
-		return RulesResolveResp{}, err
 	}
 	return out, nil
 }
@@ -405,53 +378,6 @@ func consumeJobEventStream(
 			dataLines = append(dataLines, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
 		}
 	}
-}
-
-func (a *API) Download(ctx context.Context, token, rawURL string) ([]byte, string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
-	if err != nil {
-		return nil, "", err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	return a.downloadWithRetry(ctx, defaultMaxAttempts, func() (*http.Request, error) {
-		return cloneRequest(req)
-	})
-}
-
-func (a *API) downloadWithRetry(ctx context.Context, maxAttempts int, buildReq func() (*http.Request, error)) ([]byte, string, error) {
-	if maxAttempts <= 0 {
-		maxAttempts = 1
-	}
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		req, err := buildReq()
-		if err != nil {
-			return nil, "", err
-		}
-		body, sha, err := a.downloadOnce(req)
-		if err == nil {
-			return body, sha, nil
-		}
-		if !isRetryableRequestErr(err) || attempt >= maxAttempts {
-			return nil, "", err
-		}
-		backoff := retryBackoff(attempt)
-		a.emitTrace(TraceEvent{
-			Stage:      "retry",
-			Method:     req.Method,
-			URL:        req.URL.String(),
-			DurationMs: backoff.Milliseconds(),
-			Error:      err.Error(),
-			Request:    fmt.Sprintf(`{"attempt":%d,"next_attempt":%d}`, attempt, attempt+1),
-		})
-		timer := time.NewTimer(backoff)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return nil, "", ctx.Err()
-		case <-timer.C:
-		}
-	}
-	return nil, "", fmt.Errorf("download retry exhausted")
 }
 
 func (a *API) downloadOnce(req *http.Request) ([]byte, string, error) {

@@ -12,33 +12,13 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"syl-listing-pro/internal/rules"
 )
 
-func prepareRunGenCachedRules(t *testing.T, marker string) {
+func prepareRunGenEnv(t *testing.T) {
 	t.Helper()
 	home := t.TempDir()
-	cacheHome := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv("XDG_CACHE_HOME", cacheHome)
 	writeKeyEnvForTest(t, home)
-
-	cacheDir, err := rules.DefaultCacheDir()
-	if err != nil {
-		t.Fatal(err)
-	}
-	archivePath, err := rules.SaveArchive(cacheDir, "demo", "v1", makeRulesArchiveBytes(t, marker))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := rules.SaveState(cacheDir, "demo", rules.CacheState{
-		RulesVersion: "v1",
-		ManifestSHA:  "sha",
-		ArchivePath:  archivePath,
-	}); err != nil {
-		t.Fatal(err)
-	}
 }
 
 func newRunGenFastSuccessServer(t *testing.T) *httptest.Server {
@@ -48,8 +28,6 @@ func newRunGenFastSuccessServer(t *testing.T) *httptest.Server {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/auth/exchange":
 			_, _ = io.WriteString(w, `{"access_token":"at","tenant_id":"demo","expires_in":3600}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/rules/resolve":
-			_, _ = io.WriteString(w, `{"up_to_date":true,"rules_version":"v1"}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/generate":
 			id := seq.Add(1)
 			_, _ = io.WriteString(w, fmt.Sprintf(`{"job_id":"job_%d","status":"queued"}`, id))
@@ -68,7 +46,7 @@ func newRunGenFastSuccessServer(t *testing.T) *httptest.Server {
 
 func TestRunGen_TaskLabelFormats(t *testing.T) {
 	stubDocxConverter(t)
-	prepareRunGenCachedRules(t, "#MARK")
+	prepareRunGenEnv(t)
 	ts := newRunGenFastSuccessServer(t)
 	defer ts.Close()
 
@@ -136,7 +114,7 @@ func TestRunGen_TaskLabelFormats(t *testing.T) {
 
 func TestRunGen_ConcurrencyLimit(t *testing.T) {
 	stubDocxConverter(t)
-	prepareRunGenCachedRules(t, "#MARK")
+	prepareRunGenEnv(t)
 	var seq atomic.Int64
 	var current atomic.Int64
 	var maxSeen atomic.Int64
@@ -145,8 +123,6 @@ func TestRunGen_ConcurrencyLimit(t *testing.T) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/auth/exchange":
 			_, _ = io.WriteString(w, `{"access_token":"at","tenant_id":"demo","expires_in":3600}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/rules/resolve":
-			_, _ = io.WriteString(w, `{"up_to_date":true,"rules_version":"v1"}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/generate":
 			n := current.Add(1)
 			for {
@@ -199,13 +175,11 @@ func TestRunGen_ConcurrencyLimit(t *testing.T) {
 
 func TestRunGen_TraceWarnOnlyOnce(t *testing.T) {
 	stubDocxConverter(t)
-	prepareRunGenCachedRules(t, "#MARK")
+	prepareRunGenEnv(t)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/auth/exchange":
 			_, _ = io.WriteString(w, `{"access_token":"at","tenant_id":"demo","expires_in":3600}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/rules/resolve":
-			_, _ = io.WriteString(w, `{"up_to_date":true,"rules_version":"v1"}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/generate":
 			_, _ = io.WriteString(w, `{"job_id":"job_1","status":"queued"}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job_1/events":
@@ -245,13 +219,11 @@ func TestRunGen_TraceWarnOnlyOnce(t *testing.T) {
 
 func TestRunGen_ContextCancelWithQueuedTasks(t *testing.T) {
 	stubDocxConverter(t)
-	prepareRunGenCachedRules(t, "#MARK")
+	prepareRunGenEnv(t)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/auth/exchange":
 			_, _ = io.WriteString(w, `{"access_token":"at","tenant_id":"demo","expires_in":3600}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/rules/resolve":
-			_, _ = io.WriteString(w, `{"up_to_date":true,"rules_version":"v1"}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/generate":
 			select {
 			case <-time.After(2 * time.Second):
@@ -295,7 +267,7 @@ func TestRunGen_ContextCancelWithQueuedTasks(t *testing.T) {
 
 func TestRunGen_SuccessDoesNotEmitInterruptCleanupAfterReturn(t *testing.T) {
 	stubDocxConverter(t)
-	prepareRunGenCachedRules(t, "#MARK")
+	prepareRunGenEnv(t)
 	ts := newRunGenFastSuccessServer(t)
 	defer ts.Close()
 

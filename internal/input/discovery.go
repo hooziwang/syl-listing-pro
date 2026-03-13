@@ -1,9 +1,7 @@
 package input
 
 import (
-	"bufio"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,11 +12,7 @@ type RequirementFile struct {
 	Content string
 }
 
-func Discover(inputs []string, marker string) ([]RequirementFile, error) {
-	marker = strings.TrimSpace(marker)
-	if marker == "" {
-		return nil, fmt.Errorf("规则中未定义输入识别标记")
-	}
+func Discover(inputs []string) ([]RequirementFile, error) {
 	var out []RequirementFile
 	seen := map[string]struct{}{}
 	for _, in := range inputs {
@@ -31,60 +25,48 @@ func Discover(inputs []string, marker string) ([]RequirementFile, error) {
 				if err != nil {
 					return err
 				}
-				if d.IsDir() {
+				if d.IsDir() || !isMarkdownFile(path) {
 					return nil
 				}
-				ok, content, err := readIfRequirement(path, marker)
-				if err != nil {
-					return err
-				}
-				if ok {
-					if _, exists := seen[path]; !exists {
-						seen[path] = struct{}{}
-						out = append(out, RequirementFile{Path: path, Content: content})
-					}
-				}
-				return nil
+				return appendRequirementFile(path, seen, &out)
 			})
 			if err != nil {
 				return nil, err
 			}
 			continue
 		}
-		ok, content, err := readIfRequirement(in, marker)
-		if err != nil {
+		if err := appendRequirementFile(in, seen, &out); err != nil {
 			return nil, err
-		}
-		if ok {
-			if _, exists := seen[in]; !exists {
-				seen[in] = struct{}{}
-				out = append(out, RequirementFile{Path: in, Content: content})
-			}
 		}
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("未发现 listing 要求文件（首行需为 %s）", marker)
+		return nil, fmt.Errorf("未发现 markdown 输入文件")
 	}
 	return out, nil
 }
 
-func readIfRequirement(path string, marker string) (bool, string, error) {
-	f, err := os.Open(path)
+func appendRequirementFile(path string, seen map[string]struct{}, out *[]RequirementFile) error {
+	if _, exists := seen[path]; exists {
+		return nil
+	}
+	content, err := os.ReadFile(path)
 	if err != nil {
-		return false, "", err
+		return err
 	}
-	defer f.Close()
-	r := bufio.NewReader(f)
-	line1, err := r.ReadString('\n')
-	if err != nil && err != io.EOF {
-		return false, "", err
+	seen[path] = struct{}{}
+	*out = append(*out, RequirementFile{
+		Path:    path,
+		Content: string(content),
+	})
+	return nil
+}
+
+func isMarkdownFile(path string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".md", ".markdown":
+		return true
+	default:
+		return false
 	}
-	if strings.TrimSpace(strings.TrimPrefix(line1, "\ufeff")) != marker {
-		return false, "", nil
-	}
-	rest, err := io.ReadAll(r)
-	if err != nil {
-		return false, "", err
-	}
-	return true, string(rest), nil
 }

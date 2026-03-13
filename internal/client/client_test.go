@@ -106,7 +106,7 @@ func TestCloneRequest(t *testing.T) {
 	}
 }
 
-func TestDoJSONWithRetryAndDownloadWithRetry(t *testing.T) {
+func TestDoJSONWithRetry(t *testing.T) {
 	var tries atomic.Int32
 	api := &API{
 		baseURL: "http://x",
@@ -130,23 +130,6 @@ func TestDoJSONWithRetryAndDownloadWithRetry(t *testing.T) {
 		t.Fatalf("tries=%d want=2", tries.Load())
 	}
 
-	tries.Store(0)
-	api.http = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		n := tries.Add(1)
-		if n == 1 {
-			return newResp(503, "busy"), nil
-		}
-		return newResp(200, "bin"), nil
-	})}
-	b, sha, err := api.downloadWithRetry(ctx, 2, func() (*http.Request, error) {
-		return http.NewRequestWithContext(ctx, http.MethodGet, "http://x/d", nil)
-	})
-	if err != nil {
-		t.Fatalf("downloadWithRetry error: %v", err)
-	}
-	if string(b) != "bin" || sha == "" {
-		t.Fatalf("unexpected download result b=%q sha=%q", string(b), sha)
-	}
 }
 
 func TestAPIEndpointsAndTrace(t *testing.T) {
@@ -159,12 +142,6 @@ func TestAPIEndpointsAndTrace(t *testing.T) {
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/auth/exchange":
 			gotAuth = append(gotAuth, r.Header.Get("Authorization"))
 			_, _ = io.WriteString(w, `{"access_token":"at","tenant_id":"demo","expires_in":3600}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/rules/resolve":
-			gotAuth = append(gotAuth, r.Header.Get("Authorization"))
-			if r.URL.Query().Get("current") != "v1" {
-				t.Fatalf("current query missing")
-			}
-			_, _ = io.WriteString(w, `{"up_to_date":true,"rules_version":"v1"}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/generate":
 			gotAuth = append(gotAuth, r.Header.Get("Authorization"))
 			gotGenerateContentType = r.Header.Get("Content-Type")
@@ -173,8 +150,6 @@ func TestAPIEndpointsAndTrace(t *testing.T) {
 			_, _ = io.WriteString(w, `{"job_id":"j1","status":"queued"}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/j1/result":
 			_, _ = io.WriteString(w, `{"en_markdown":"en","cn_markdown":"cn"}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/download":
-			_, _ = w.Write([]byte{0xff, 0x01})
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -193,11 +168,6 @@ func TestAPIEndpointsAndTrace(t *testing.T) {
 		t.Fatalf("Exchange got=%+v err=%v", ex, err)
 	}
 
-	rulesResp, err := api.ResolveRules(context.Background(), "at", "v1")
-	if err != nil || !rulesResp.UpToDate {
-		t.Fatalf("ResolveRules got=%+v err=%v", rulesResp, err)
-	}
-
 	genResp, err := api.Generate(context.Background(), "at", GenerateReq{InputMarkdown: "abc", CandidateCount: 1})
 	if err != nil || genResp.JobID != "j1" {
 		t.Fatalf("Generate got=%+v err=%v", genResp, err)
@@ -213,10 +183,6 @@ func TestAPIEndpointsAndTrace(t *testing.T) {
 	res, err := api.Result(context.Background(), "at", "j1")
 	if err != nil || res.ENMarkdown != "en" || res.CNMarkdown != "cn" {
 		t.Fatalf("Result got=%+v err=%v", res, err)
-	}
-	b, sha, err := api.Download(context.Background(), "at", ts.URL+"/download")
-	if err != nil || len(b) != 2 || sha == "" {
-		t.Fatalf("Download b=%v sha=%q err=%v", b, sha, err)
 	}
 
 	for _, h := range gotAuth {

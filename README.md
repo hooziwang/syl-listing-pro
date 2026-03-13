@@ -138,14 +138,6 @@ syl-listing-pro gen [file_or_dir ...]
 syl-listing-pro set key <SYL_LISTING_KEY>
 ```
 
-### 强制更新规则
-
-```bash
-syl-listing-pro update rules
-```
-
-行为：清除本地规则缓存并下载最新规则。
-
 ### 版本
 
 ```bash
@@ -188,6 +180,9 @@ syl:00:44 CN Word 已写入：/abs/listing_xxx_cn.docx
 任务完成：成功 1，失败 0，总耗时 48s
 ```
 
+说明：
+- `规则已加载 rules-xxx` 来自 worker 运行时事件，CLI 本地不保存规则包。
+
 ### `--verbose` 模式（机器友好）
 
 输出 NDJSON，每行一个 JSON 事件，便于脚本解析和链路排障。
@@ -195,10 +190,7 @@ syl:00:44 CN Word 已写入：/abs/listing_xxx_cn.docx
 ## 数据位置
 
 - Key：`~/.syl-listing-pro/.env`
-- 规则缓存：系统缓存目录（由程序自动管理）
-
 说明：
-- 规则对用户默认不可见，不需要手工编辑。
 - 默认连接服务端可通过环境变量 `SYL_LISTING_WORKER_URL` 覆盖。
 
 ## 常见问题
@@ -206,16 +198,13 @@ syl:00:44 CN Word 已写入：/abs/listing_xxx_cn.docx
 1. `尚未配置 KEY，需要执行 syl-listing-pro set key <SYL_LISTING_KEY>`
 先执行 `set key`。
 
-2. `规则中心不可达且首次运行无缓存`
-当前网络无法访问服务端且本地无规则缓存。恢复网络后重试。
-
-3. `EN/CN Word 转换失败`
+2. `EN/CN Word 转换失败`
 优先检查：
 - `syl-md2doc` 是否可执行
 - `pandoc` 是否可执行
 
-4. 文件被识别失败（未发现需求文件）
-说明输入文件首行标记与当前规则不匹配，改用最新模板。
+3. 文件被识别失败（未发现 markdown 输入文件）
+当前传入目录下没有可处理的 `.md` 或 `.markdown` 文件。
 
 ## 退出码
 
