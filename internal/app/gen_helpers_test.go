@@ -42,8 +42,8 @@ func TestRenderWorkerTraceLine(t *testing.T) {
 		t.Fatalf("got=%q", got)
 	}
 
-	it = client.JobTraceItem{Event: "rules_loaded", Payload: map[string]any{"rules_version": "v1"}}
-	if got := renderWorkerTraceLine(it, false); got != "规则已加载 v1" {
+	it = client.JobTraceItem{Event: "rules_loaded", Payload: map[string]any{"rules_version": "v1", "worker_version": "v0.1.2"}}
+	if got := renderWorkerTraceLine(it, false); got != "规则已加载 v1 | worker v0.1.2" {
 		t.Fatalf("got=%q", got)
 	}
 

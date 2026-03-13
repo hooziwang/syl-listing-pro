@@ -478,7 +478,12 @@ func renderWorkerTraceLine(item client.JobTraceItem, colorizeLabel bool) string 
 		}
 		return "任务已加入队列"
 	case "rules_loaded":
-		return fmt.Sprintf("规则已加载 %s", stringPayload(item.Payload, "rules_version"))
+		rulesVersion := stringPayload(item.Payload, "rules_version")
+		workerVersion := stringPayload(item.Payload, "worker_version")
+		if strings.TrimSpace(workerVersion) != "" {
+			return fmt.Sprintf("规则已加载 %s | worker %s", rulesVersion, workerVersion)
+		}
+		return fmt.Sprintf("规则已加载 %s", rulesVersion)
 	case "section_generate_ok":
 		step := stringPayload(item.Payload, "step")
 		if _, ok := judgeRoundOfStep(step); ok {
