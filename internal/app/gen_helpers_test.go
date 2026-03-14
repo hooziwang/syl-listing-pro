@@ -92,7 +92,7 @@ func TestRenderWorkerTraceLine(t *testing.T) {
 			},
 		},
 	}
-	if got = renderWorkerTraceLine(it, false); got != "五点描述候选评分：#1失败(第2条长度不足: 235<240)，#2=1，已选 #2" {
+	if got = renderWorkerTraceLine(it, false); got != "五点描述 候选评分：#1失败(第2条长度不足: 235<240)，#2=1，已选 #2" {
 		t.Fatalf("got=%q", got)
 	}
 
@@ -107,7 +107,7 @@ func TestRenderWorkerTraceLine(t *testing.T) {
 			},
 		},
 	}
-	if got = renderWorkerTraceLine(it, true); got != "\x1b[92m标题\x1b[0m候选评分：#1=68，已选 #1 \x1b[90m13.55s\x1b[0m" {
+	if got = renderWorkerTraceLine(it, true); got != "\x1b[92m标题\x1b[0m 候选评分：#1=68，已选 #1 \x1b[90m13.55s\x1b[0m" {
 		t.Fatalf("got=%q", got)
 	}
 

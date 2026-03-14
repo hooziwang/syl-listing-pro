@@ -528,9 +528,9 @@ func renderWorkerTraceLine(item client.JobTraceItem, colorizeLabel bool) string 
 		}
 		selected := intPayload(item.Payload, "selected_candidate_index")
 		if selected > 0 {
-			return fmt.Sprintf("%s候选评分：%s，已选 #%d%s", label, strings.Join(scores, "，"), selected, tailDuration(item.Payload, "duration_ms", colorizeLabel))
+			return fmt.Sprintf("%s 候选评分：%s，已选 #%d%s", label, strings.Join(scores, "，"), selected, tailDuration(item.Payload, "duration_ms", colorizeLabel))
 		}
-		return fmt.Sprintf("%s候选评分：%s%s", label, strings.Join(scores, "，"), tailDuration(item.Payload, "duration_ms", colorizeLabel))
+		return fmt.Sprintf("%s 候选评分：%s%s", label, strings.Join(scores, "，"), tailDuration(item.Payload, "duration_ms", colorizeLabel))
 	case "job_retry_scheduled":
 		return fmt.Sprintf("任务重试计划：第 %d/%d 次失败，准备第 %d 次（等待由队列退避控制）：%s",
 			intPayload(item.Payload, "attempt"),
