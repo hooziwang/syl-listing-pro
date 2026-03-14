@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -332,7 +333,7 @@ func TestRunGen_ContextCancelReturnsQuickly(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected RunGen error on canceled context")
 	}
-	if !strings.Contains(err.Error(), "存在失败任务") {
+	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("unexpected err: %v", err)
 	}
 	if time.Since(start) > 3*time.Second {
