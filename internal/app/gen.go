@@ -166,7 +166,7 @@ func RunGen(ctx context.Context, opts GenOptions) error {
 	go func() {
 		select {
 		case <-ctx.Done():
-			if errors.Is(ctx.Err(), context.Canceled) {
+			if isContextCanceledErr(ctx.Err()) {
 				cancelSubmittedTasks()
 			}
 		case <-runDone:
@@ -185,6 +185,10 @@ func RunGen(ctx context.Context, opts GenOptions) error {
 		go func() {
 			defer wg.Done()
 			if err := sem.Acquire(ctx, 1); err != nil {
+				if isContextCanceledErr(err) {
+					log.Info(fmt.Sprintf("%s 已取消", taskPrefix(ex.TenantID, 0, task.label)))
+					return
+				}
 				failedCount.Add(1)
 				log.Info(fmt.Sprintf("%s 生成失败：%v", taskPrefix(ex.TenantID, 0, task.label), err))
 				return
@@ -197,11 +201,14 @@ func RunGen(ctx context.Context, opts GenOptions) error {
 				successCount.Add(1)
 				return
 			}
+			if isContextCanceledErr(ctx.Err()) {
+				return
+			}
 			failedCount.Add(1)
 		}()
 	}
 	wg.Wait()
-	if errors.Is(ctx.Err(), context.Canceled) {
+	if isContextCanceledErr(ctx.Err()) {
 		cancelSubmittedTasks()
 		select {
 		case <-cancelDone:
